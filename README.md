@@ -11,6 +11,17 @@ python genmol/scripts/preprocess_polymer_safe.py \
 
 ## Second, train model.
 ```bash
+# Train with reduced batch size to fit in available GPU memory
+CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node 1 scripts/train.py \
+    hydra.run.dir=ckpt/polymer_model \
+    wandb.name=null \
+    data=/home/htang228/Machine_learning/Diffusion_model/PolyDiffusion/data/water_soluble_polymer_safe.txt \
+    loader.global_batch_size=32 \
+    trainer.max_steps=5000 \
+    callback.dirpath=./checkpoints_polymer
+```
+
+```bash
 torchrun --nproc_per_node 1 scripts/train.py \
     hydra.run.dir=ckpt/polymer_test \
     wandb.name=null \
