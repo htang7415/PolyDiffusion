@@ -24,8 +24,7 @@ CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node 1 scripts/train.py \
 ```bash
 torchrun --nproc_per_node 1 scripts/train.py \
     hydra.run.dir=ckpt/polymer_test \
-    wandb.name=null \
-    data=/home/htang228/Machine_learning/Diffusion_model/PolyDiffusion/data/water_soluble_polymer_safe.txt
+    wandb.name=null
 ```
 
 ## Third, generate polymers
