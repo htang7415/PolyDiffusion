@@ -1,1 +1,1 @@
-## This project is in process. See you soon.
+## In process. See you soon.
