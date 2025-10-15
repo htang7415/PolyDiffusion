@@ -1,0 +1,16 @@
+vocab_path: vocab.txt
+model_config: configs/model_base.yaml
+data:
+  path: data/homopolymers.csv
+training:
+  batch_size: 32
+  lr: 1.0e-4
+  steps: 200
+  log_interval: 20
+loss:
+  lambda_syn: 0.5
+  lambda_prop: 1.0
+  lambda_gram: 0.1
+sampling:
+  cfg_scale: 1.5
+  gradient_weight: 0.1

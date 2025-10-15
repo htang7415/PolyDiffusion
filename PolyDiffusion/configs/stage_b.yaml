@@ -1,0 +1,12 @@
+vocab_path: vocab.txt
+model_config: configs/model_base.yaml
+data:
+  path: data/pi1m.jsonl.gz
+training:
+  batch_size: 2048
+  lr: 2.0e-4
+  steps: 500
+  log_interval: 50
+loss:
+  lambda_syn: 0.5
+  lambda_gram: 0.1

@@ -1,0 +1,11 @@
+vocab_path: vocab.txt
+model_config: configs/model_base.yaml
+data:
+  path: data/molecules.jsonl.gz
+training:
+  batch_size: 2048
+  lr: 3.0e-4
+  steps: 1000
+  log_interval: 50
+loss:
+  lambda_syn: 0.5
