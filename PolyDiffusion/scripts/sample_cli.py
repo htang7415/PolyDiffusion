@@ -10,11 +10,9 @@ from typing import Dict, Optional
 
 import torch
 
-from PolyDiffusion.src.chem.vocab import AnchorSafeVocab
-from PolyDiffusion.src.models.dit_token import DiffusionTransformer, ModelConfig
-from PolyDiffusion.src.models.diffusion_token import DiffusionConfig
-from PolyDiffusion.src.sampling.sampler import GuidedSampler, SamplerConfig
-from PolyDiffusion.src.train.common import load_yaml
+from PolyDiffusion.chem.vocab import AnchorSafeVocab
+from PolyDiffusion.sampling.sampler import GuidedSampler, SamplerConfig
+from PolyDiffusion.train.common import build_model, load_yaml
 
 
 def parse_targets(target_str: Optional[str]) -> Dict[str, float]:
@@ -39,31 +37,6 @@ def parse_targets(target_str: Optional[str]) -> Dict[str, float]:
     return targets
 
 
-def build_model(vocab: AnchorSafeVocab, config_path: Path) -> DiffusionTransformer:
-    cfg = load_yaml(config_path)
-    model_cfg = ModelConfig(
-        vocab_size=len(vocab),
-        hidden_size=cfg["d_model"],
-        num_layers=cfg["n_layers"],
-        num_heads=cfg["n_heads"],
-        dropout=cfg.get("dropout", 0.1),
-        diffusion_steps=cfg.get("diffusion_steps", 8),
-        property_names=cfg.get("property_names", ["Tg", "Tm", "Td", "Eg", "chi"]),
-        cfg_dropout=cfg.get("cfg_dropout", 0.1),
-        use_flow_matching=cfg.get("use_flow_matching", False),
-        self_conditioning=cfg.get("self_conditioning", True),
-    )
-    diffusion_cfg = DiffusionConfig(
-        vocab_size=len(vocab),
-        num_steps=model_cfg.diffusion_steps,
-        mask_token_id=vocab.mask_id,
-        schedule=cfg.get("schedule", "linear"),
-        min_noise=cfg.get("min_noise", 0.05),
-        max_noise=cfg.get("max_noise", 0.4),
-    )
-    return DiffusionTransformer(model_cfg, diffusion_cfg)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", required=True, type=str, help="Checkpoint path.")
@@ -75,12 +48,19 @@ def main() -> None:
     parser.add_argument("--s_target", default=None, type=float, help="Synthesis score target.")
     parser.add_argument("--cfg", default=1.5, type=float, help="CFG scale.")
     parser.add_argument("--grad", default=0.0, type=float, help="Gradient guidance weight.")
+    parser.add_argument("--device", default="auto", type=str, help="Target device (auto/cpu/cuda).")
     args = parser.parse_args()
 
     vocab = AnchorSafeVocab.load(Path(args.vocab))
-    model = build_model(vocab, Path(args.config))
+    model_cfg = load_yaml(Path(args.config))
+    model = build_model(vocab, model_cfg)
     ckpt = torch.load(args.ckpt, map_location="cpu")
     model.load_state_dict(ckpt, strict=False)
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args.device)
+    model.to(device)
     sampler = GuidedSampler(model, vocab, SamplerConfig(cfg_scale=args.cfg, gradient_weight=args.grad))
 
     property_targets = parse_targets(args.targets)

@@ -48,9 +48,9 @@ setup(
             "polydiff-vocab=PolyDiffusion.scripts.build_vocab:main",
             "polydiff-sample=PolyDiffusion.scripts.sample_cli:main",
             "polydiff-eval=PolyDiffusion.scripts.evaluate_stage:main",
-            "polydiff-train-a=PolyDiffusion.src.train.train_stage_a:main",
-            "polydiff-train-b=PolyDiffusion.src.train.train_stage_b:main",
-            "polydiff-train-c=PolyDiffusion.src.train.train_stage_c:main",
+            "polydiff-train-a=PolyDiffusion.train.train_stage_a:main",
+            "polydiff-train-b=PolyDiffusion.train.train_stage_b:main",
+            "polydiff-train-c=PolyDiffusion.train.train_stage_c:main",
         ],
     },
     classifiers=[

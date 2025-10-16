@@ -37,14 +37,21 @@ class GuidedSampler:
         num_samples: int,
         property_targets: Optional[Dict[str, float]],
         synth_target: Optional[float],
-    ) -> Dict[str, torch.Tensor]:
-        prop_tensors: Dict[str, torch.Tensor] = {}
+    ) -> tuple[Optional[Dict[str, torch.Tensor]], Optional[torch.Tensor]]:
+        prop_tensors: Optional[Dict[str, torch.Tensor]] = None
         if property_targets:
-            for name, value in property_targets.items():
-                prop_tensors[name] = torch.full((num_samples,), float(value), device=self.device)
-        if synth_target is not None:
-            prop_tensors["_s_target"] = torch.full((num_samples,), float(synth_target), device=self.device)
-        return prop_tensors
+            valid_props = set(getattr(self.model.config, "property_names", []))
+            invalid = set(property_targets) - valid_props
+            if invalid:
+                raise ValueError(f"Unknown property targets: {', '.join(sorted(invalid))}")
+            prop_tensors = {
+                name: torch.full((num_samples,), float(value), device=self.device)
+                for name, value in property_targets.items()
+            }
+        s_target_tensor = (
+            torch.full((num_samples,), float(synth_target), device=self.device) if synth_target is not None else None
+        )
+        return prop_tensors, s_target_tensor
 
     def sample(
         self,
@@ -58,8 +65,7 @@ class GuidedSampler:
         cfg_scale = cfg_scale if cfg_scale is not None else self.config.cfg_scale
         gradient_weight = gradient_weight if gradient_weight is not None else self.config.gradient_weight
 
-        props = {k: torch.full((num_samples,), float(v), device=self.device) for k, v in (property_targets or {}).items()}
-        s_target_tensor = torch.full((num_samples,), float(synth_target), device=self.device) if synth_target is not None else None
+        properties, s_target_tensor = self._prepare_conditions(num_samples, property_targets, synth_target)
 
         seq_len = self.config.max_length
         tokens = torch.full((num_samples, seq_len), self.vocab.pad_id, device=self.device, dtype=torch.long)
@@ -78,20 +84,21 @@ class GuidedSampler:
         attention_mask = tokens != self.vocab.pad_id
         final_outputs = None
 
-        for step in reversed(range(max(num_steps, 1))):
+        total_steps = max(1, min(num_steps, self.model.diffusion.config.num_steps))
+        for step in reversed(range(total_steps)):
             timesteps = torch.full((num_samples,), step, device=self.device, dtype=torch.long)
             use_grad = gradient_weight > 0.0
             if use_grad:
-                outputs_cond = self.model(tokens, timesteps, attention_mask=attention_mask, properties=props if props else None, s_target=s_target_tensor)
+                outputs_cond = self.model(tokens, timesteps, attention_mask=attention_mask, properties=properties, s_target=s_target_tensor)
             else:
                 with torch.no_grad():
-                    outputs_cond = self.model(tokens, timesteps, attention_mask=attention_mask, properties=props if props else None, s_target=s_target_tensor)
+                    outputs_cond = self.model(tokens, timesteps, attention_mask=attention_mask, properties=properties, s_target=s_target_tensor)
             with torch.no_grad():
                 outputs_uncond = self.model(
                     tokens,
                     timesteps,
                     attention_mask=attention_mask,
-                    properties=props if props else None,
+                    properties=properties,
                     s_target=s_target_tensor,
                     condition_dropout_mask=uncond_mask,
                 )
@@ -101,7 +108,7 @@ class GuidedSampler:
 
             if gradient_weight > 0.0:
                 logits_cond.requires_grad_(True)
-                guidance_loss = 0.0
+                guidance_loss = torch.zeros((), device=self.device)
                 if property_targets:
                     for name, target in property_targets.items():
                         pred = outputs_cond["property_preds"].get(name)
@@ -109,7 +116,7 @@ class GuidedSampler:
                             guidance_loss = guidance_loss + (pred - float(target)).pow(2).mean()
                 if synth_target is not None:
                     guidance_loss = guidance_loss + torch.relu(outputs_cond["synth_pred"] - float(synth_target)).mean()
-                if isinstance(guidance_loss, torch.Tensor) and guidance_loss.requires_grad:
+                if guidance_loss.requires_grad:
                     grad = torch.autograd.grad(guidance_loss, logits_cond, retain_graph=False, allow_unused=True)[0]
                     if grad is not None:
                         logits = logits - gradient_weight * grad

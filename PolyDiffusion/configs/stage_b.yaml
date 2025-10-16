@@ -1,12 +1,35 @@
 vocab_path: vocab.txt
 model_config: configs/model_base.yaml
+
+# Load pretrained Stage A model for transfer learning
+pretrained_checkpoint: Results/stage_a/best_model.pt
+freeze_backbone: false  # Set to true to freeze backbone and only train heads
+
+# Results directory for checkpoints
+results_dir: Results/stage_b
+
 data:
   path: data/pi1m.jsonl.gz
+  limit: null
+  shuffle: true
+  cache_in_memory: true
+  seed: 42
+
 training:
   batch_size: 2048
   lr: 2.0e-4
+  lr_min: 1.0e-6
+  weight_decay: 0.01
   steps: 500
   log_interval: 50
+  save_interval: 250  # Save checkpoint every 250 steps
+  max_grad_norm: 1.0
+  num_workers: 4
+  pin_memory: true
+
 loss:
   lambda_syn: 0.5
   lambda_gram: 0.1
+
+# Optional: Resume from checkpoint if training interrupted
+# resume_checkpoint: Results/stage_b/checkpoint_step_250.pt

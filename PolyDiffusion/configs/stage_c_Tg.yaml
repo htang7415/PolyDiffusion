@@ -1,0 +1,46 @@
+# Stage C Configuration: Tg (Glass Transition Temperature) Property Training
+# This config trains a model specifically for Tg property prediction and generation
+
+vocab_path: vocab.txt
+model_config: configs/model_base.yaml
+
+# IMPORTANT: Specify target property for single-property training
+target_property: Tg
+
+# Load pretrained Stage B model for transfer learning
+pretrained_checkpoint: Results/stage_b/best_model.pt
+freeze_backbone: false  # Set to true to freeze backbone and only train heads
+
+# Results will be saved in property-specific directory
+results_dir: Results/stage_c/Tg
+
+data:
+  path: data/homopolymers.csv
+  limit: null  # Use full dataset, or set integer to use subset
+  shuffle: true
+  cache_in_memory: true
+  seed: 42
+
+training:
+  batch_size: 32  # Smaller batch size for property training
+  lr: 1.0e-4  # Fine-tuning learning rate
+  lr_min: 1.0e-6  # Minimum LR for cosine annealing
+  weight_decay: 0.01
+  steps: 500  # Adjust based on dataset size
+  log_interval: 20
+  save_interval: 100  # Save checkpoint every 100 steps
+  max_grad_norm: 1.0
+  num_workers: 2
+  pin_memory: true
+
+loss:
+  lambda_syn: 0.5  # Synthesis loss weight
+  lambda_prop: 1.0  # Property loss weight (can increase for stronger conditioning)
+  lambda_gram: 0.1  # Grammar penalty weight
+
+sampling:
+  cfg_scale: 2.0  # Classifier-free guidance scale
+  gradient_weight: 0.15  # Gradient guidance weight
+
+# Optional: Resume from checkpoint if training interrupted
+# resume_checkpoint: Results/stage_c/Tg/checkpoint_step_300.pt

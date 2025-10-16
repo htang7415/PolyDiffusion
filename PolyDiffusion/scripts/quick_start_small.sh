@@ -94,9 +94,9 @@ create_config "$WORKDIR/stage_a.yaml" "$DATADIR/stage_a.jsonl" 3
 create_config "$WORKDIR/stage_b.yaml" "$DATADIR/stage_b.jsonl" 3
 create_config "$WORKDIR/stage_c.yaml" "$DATADIR/stage_c.csv" 3
 
-PYTHONPATH="$ROOT" python -m PolyDiffusion.src.train.train_stage_a --config "$WORKDIR/stage_a.yaml"
-PYTHONPATH="$ROOT" python -m PolyDiffusion.src.train.train_stage_b --config "$WORKDIR/stage_b.yaml"
-PYTHONPATH="$ROOT" python -m PolyDiffusion.src.train.train_stage_c --config "$WORKDIR/stage_c.yaml"
+PYTHONPATH="$ROOT" python -m PolyDiffusion.train.train_stage_a --config "$WORKDIR/stage_a.yaml"
+PYTHONPATH="$ROOT" python -m PolyDiffusion.train.train_stage_b --config "$WORKDIR/stage_b.yaml"
+PYTHONPATH="$ROOT" python -m PolyDiffusion.train.train_stage_c --config "$WORKDIR/stage_c.yaml"
 
 PYTHONPATH="$ROOT" python -m PolyDiffusion.scripts.sample_cli \
   --ckpt "$WORKDIR/stage_c.pt" \

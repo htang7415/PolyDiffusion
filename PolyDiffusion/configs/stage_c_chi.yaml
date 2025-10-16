@@ -1,0 +1,36 @@
+# Stage C Configuration: chi (Flory-Huggins Interaction Parameter) Property Training
+
+vocab_path: vocab.txt
+model_config: configs/model_base.yaml
+target_property: chi
+pretrained_checkpoint: Results/stage_b/best_model.pt
+freeze_backbone: false
+results_dir: Results/stage_c/chi
+
+data:
+  path: data/homopolymers.csv
+  limit: null
+  shuffle: true
+  cache_in_memory: true
+  seed: 42
+
+training:
+  batch_size: 32
+  lr: 1.0e-4
+  lr_min: 1.0e-6
+  weight_decay: 0.01
+  steps: 500
+  log_interval: 20
+  save_interval: 100
+  max_grad_norm: 1.0
+  num_workers: 2
+  pin_memory: true
+
+loss:
+  lambda_syn: 0.5
+  lambda_prop: 1.0
+  lambda_gram: 0.1
+
+sampling:
+  cfg_scale: 2.0
+  gradient_weight: 0.15

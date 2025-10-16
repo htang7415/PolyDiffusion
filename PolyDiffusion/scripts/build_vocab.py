@@ -8,17 +8,17 @@ import csv
 from pathlib import Path
 from typing import Iterable
 
-from PolyDiffusion.src.chem.vocab import AnchorSafeVocab
-from PolyDiffusion.src.utils.fileio import open_compressed, stream_jsonl
+from PolyDiffusion.chem.vocab import AnchorSafeVocab
+from PolyDiffusion.utils.fileio import open_compressed, stream_jsonl
 
 
 def iter_strings(path: Path, field: str, limit: int | None) -> Iterable[str]:
     count = 0
     if path.suffix in {".jsonl", ".gz"}:
         for record in stream_jsonl(path):
-            if field not in record:
+            if field not in record or record[field] is None:
                 continue
-            yield record[field]
+            yield str(record[field])
             count += 1
             if limit is not None and count >= limit:
                 break
@@ -26,9 +26,9 @@ def iter_strings(path: Path, field: str, limit: int | None) -> Iterable[str]:
         with open_compressed(path, "rt") as handle:
             reader = csv.DictReader(handle)
             for row in reader:
-                if field not in row:
+                if field not in row or row[field] is None:
                     continue
-                yield row[field]
+                yield str(row[field])
                 count += 1
                 if limit is not None and count >= limit:
                     break

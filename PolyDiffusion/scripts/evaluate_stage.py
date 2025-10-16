@@ -33,11 +33,11 @@ from typing import Dict, List, Optional, Set
 import torch
 import numpy as np
 
-from PolyDiffusion.src.chem.ap_smiles import unshield_anchors, ANCHOR1, ANCHOR2
-from PolyDiffusion.src.chem.valence import has_two_anchors
-from PolyDiffusion.src.chem.vocab import AnchorSafeVocab
-from PolyDiffusion.src.sampling.sampler import GuidedSampler, SamplerConfig
-from PolyDiffusion.scripts.sample_cli import build_model
+from PolyDiffusion.chem.ap_smiles import ANCHOR1, ANCHOR2
+from PolyDiffusion.chem.valence import has_two_anchors
+from PolyDiffusion.chem.vocab import AnchorSafeVocab
+from PolyDiffusion.sampling.sampler import GuidedSampler, SamplerConfig
+from PolyDiffusion.train.common import build_model, load_yaml
 
 # Try to import RDKit for advanced validation
 try:
@@ -240,7 +240,7 @@ def load_training_set(path: Optional[Path], field: str = "smiles") -> Set[str]:
                 if field in row:
                     training_smiles.add(row[field])
     elif path.suffix in [".jsonl", ".gz"]:
-        from PolyDiffusion.src.utils.fileio import stream_jsonl
+        from PolyDiffusion.utils.fileio import stream_jsonl
         for record in stream_jsonl(path):
             if field in record:
                 training_smiles.add(record[field])
@@ -268,7 +268,8 @@ def sample_and_evaluate(
 
     logger.info(f"Loading model from {checkpoint_path}")
     vocab = AnchorSafeVocab.load(vocab_path)
-    model = build_model(vocab, config_path)
+    model_cfg = load_yaml(config_path)
+    model = build_model(vocab, model_cfg)
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     model.load_state_dict(checkpoint, strict=False)
