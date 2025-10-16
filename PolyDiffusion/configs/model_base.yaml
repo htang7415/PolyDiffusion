@@ -1,4 +1,4 @@
-d_model: 512
+d_model: 768
 n_layers: 12
 n_heads: 12
 dropout: 0.1
