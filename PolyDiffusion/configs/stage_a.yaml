@@ -1,11 +1,11 @@
-vocab_path: vocab.txt
-model_config: configs/model_base.yaml
+vocab_path: PolyDiffusion/vocab.txt
+model_config: PolyDiffusion/configs/model_base.yaml
 
 # Results directory for checkpoints
 results_dir: Results/stage_a
 
 data:
-  path: data/molecules.jsonl.gz
+  path: Data/small_molecules_part.csv
   limit: null  # Use full dataset, or set integer to use subset
   shuffle: true
   cache_in_memory: true
@@ -16,11 +16,11 @@ training:
   lr: 3.0e-4
   lr_min: 1.0e-6  # Minimum LR for cosine annealing scheduler
   weight_decay: 0.01
-  steps: 1000
-  log_interval: 50
-  save_interval: 500  # Save checkpoint every 500 steps
+  steps: 50000
+  log_interval: 500
+  save_interval: 10000  # Save checkpoint every 500 steps
   max_grad_norm: 1.0  # Gradient clipping
-  num_workers: 4
+  num_workers: 32
   pin_memory: true
 
 loss:

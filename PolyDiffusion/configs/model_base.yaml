@@ -1,9 +1,9 @@
-d_model: 128
-n_layers: 4
-n_heads: 8
+d_model: 512
+n_layers: 12
+n_heads: 12
 dropout: 0.1
-diffusion_steps: 8
-schedule: linear
+diffusion_steps: 100
+schedule: cosine
 min_noise: 0.05
 max_noise: 0.4
 cfg_dropout: 0.1

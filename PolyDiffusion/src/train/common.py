@@ -64,6 +64,9 @@ def build_stage_dataset(
         seed=data_cfg.get("seed"),
     )
     if stage == "a":
+        # Support both CSV and JSONL for Stage A
+        if config.path.suffix == ".csv":
+            return CsvDataset(config, required_fields={"SMILES", "SA_Score"})
         return JsonlDataset(config, required_fields={"smiles", "synth_score"})
     if stage == "b":
         return JsonlDataset(config, required_fields={"ap_smiles", "synth_score"})
@@ -83,9 +86,13 @@ def smiles_to_ap(smiles: str) -> str:
 
 
 def collate_stage_a(records: List[Dict[str, object]], vocab: AnchorSafeVocab) -> Dict[str, torch.Tensor]:
-    tokens = [vocab.tokenize_ap(smiles_to_ap(str(r["smiles"]))) for r in records]
+    # Support both CSV (SMILES/SA_Score) and JSONL (smiles/synth_score) field names
+    smiles_key = "SMILES" if "SMILES" in records[0] else "smiles"
+    synth_key = "SA_Score" if "SA_Score" in records[0] else "synth_score"
+
+    tokens = [vocab.tokenize_ap(smiles_to_ap(str(r[smiles_key]))) for r in records]
     batch = collate_token_batch(tokens, vocab.pad_id)
-    synth = torch.tensor([float(r["synth_score"]) for r in records], dtype=torch.float32)
+    synth = torch.tensor([float(r[synth_key]) for r in records], dtype=torch.float32)
     batch["synth"] = synth
     return batch
 

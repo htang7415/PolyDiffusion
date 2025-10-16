@@ -1,0 +1,22 @@
+Metadata-Version: 2.4
+Name: PolyDiffusion
+Version: 0.1.0
+Summary: Discrete diffusion transformer for guided homopolymer generation
+Home-page: https://github.com/your-org/PolyDiffusion
+Author: Polygenesis Team
+Author-email: 
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: torch>=2.0
+Requires-Dist: numpy
+Requires-Dist: pyyaml
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Dynamic: home-page
+Dynamic: license-file
+Dynamic: requires-python
+
+# PolyDiffusion package
+
+This directory contains the Python package that powers PolyDiffusion. For installation, training, sampling, and dataset guidelines, please see the project-level documentation in `../README.md`.

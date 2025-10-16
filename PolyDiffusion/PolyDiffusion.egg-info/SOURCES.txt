@@ -1,0 +1,9 @@
+LICENSE
+README.md
+pyproject.toml
+setup.py
+PolyDiffusion.egg-info/PKG-INFO
+PolyDiffusion.egg-info/SOURCES.txt
+PolyDiffusion.egg-info/dependency_links.txt
+PolyDiffusion.egg-info/requires.txt
+PolyDiffusion.egg-info/top_level.txt

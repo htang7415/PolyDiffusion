@@ -8,8 +8,8 @@ import csv
 from pathlib import Path
 from typing import Iterable
 
-from PolyDiffusion.chem.vocab import AnchorSafeVocab
-from PolyDiffusion.utils.fileio import open_compressed, stream_jsonl
+from PolyDiffusion.src.chem.vocab import AnchorSafeVocab
+from PolyDiffusion.src.utils.fileio import open_compressed, stream_jsonl
 
 
 def iter_strings(path: Path, field: str, limit: int | None) -> Iterable[str]:
