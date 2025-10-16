@@ -72,6 +72,56 @@ def canonicalize_ap(ap_smiles: str) -> str:
     return Chem.MolToSmiles(mol, canonical=True)
 
 
+def convert_polymer_to_ap_smiles(polymer_smiles: str) -> str:
+    """
+    Convert polymer SMILES with unlabeled * to proper AP-SMILES for Stage B.
+    Handles both bare * and bracketed [*].
+    Replaces first occurrence with [*:1] and second with [*:2].
+
+    NOTE: This is ONLY for Stage B (polymers). Stage A (small molecules) should NOT
+    use this function - small molecules don't have attachment points.
+
+    Args:
+        polymer_smiles: Polymer SMILES with exactly 2 unlabeled *
+                       (e.g., '*C(C*)C' or 'C(C(O)[*])[*]')
+
+    Returns:
+        AP-SMILES with labeled attachment points (e.g., '[*:1]C(C[*:2])C')
+
+    Raises:
+        ValueError: If the input doesn't have exactly 2 attachment points.
+
+    Examples:
+        >>> convert_polymer_to_ap_smiles('*C(C*)C')
+        '[*:1]C(C[*:2])C'
+        >>> convert_polymer_to_ap_smiles('C(C(O)[*])[*]')
+        'C(C(O)[*:1])[*:2]'
+        >>> convert_polymer_to_ap_smiles('*CCC*')
+        '[*:1]CCC[*:2]'
+    """
+    # Pattern matches either bare * or [*]
+    pattern = re.compile(r"\[\*\]|\*")
+    matches = list(pattern.finditer(polymer_smiles))
+
+    if len(matches) != 2:
+        raise ValueError(
+            f"Polymer SMILES must have exactly 2 attachment points for Stage B, "
+            f"found {len(matches)}: {polymer_smiles}"
+        )
+
+    # Replace from right to left to preserve indices
+    result = polymer_smiles
+    # Second occurrence -> [*:2]
+    match = matches[1]
+    result = result[: match.start()] + ANCHOR2 + result[match.end() :]
+    # First occurrence -> [*:1]
+    match = matches[0]
+    result = result[: match.start()] + ANCHOR1 + result[match.end() :]
+
+    _validate_ap_smiles(result)
+    return result
+
+
 def randomize_ap(ap_smiles: str, seed: int | None = None) -> str:
     """Return a randomised SMILES while keeping anchors in place."""
     _validate_ap_smiles(ap_smiles)

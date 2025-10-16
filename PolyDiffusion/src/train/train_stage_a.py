@@ -9,12 +9,13 @@ from pathlib import Path
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from ..chem.vocab import AnchorSafeVocab
+from ..chem.plain_vocab import PlainVocab
 from ..losses.objectives import stage_a_objective
 from ..utils.logging import configure_logging
 from .common import (
     build_model,
     build_stage_dataset,
+    build_vocab_from_dataset,
     collate_stage_a,
     default_device,
     load_yaml,
@@ -27,14 +28,37 @@ from .common import (
 def run_stage_a(config_path: str) -> None:
     cfg = load_yaml(Path(config_path))
     configure_logging()
+    log = logging.getLogger(__name__)
 
-    vocab = AnchorSafeVocab.load(Path(cfg["vocab_path"]))
+    # Load dataset first
+    dataset = build_stage_dataset("a", cfg["data"])
+
+    # Auto-build vocabulary if not provided or doesn't exist
+    if "vocab_path" in cfg and cfg["vocab_path"]:
+        vocab_path = Path(cfg["vocab_path"])
+        if vocab_path.exists():
+            vocab = PlainVocab.load(vocab_path)
+            log.info(f"Loaded vocabulary from {vocab_path}")
+        else:
+            log.warning(f"Vocabulary file {vocab_path} not found. Building from dataset...")
+            vocab = build_vocab_from_dataset(dataset, "a", limit=cfg.get("vocab_limit", 10000))
+            vocab_path.parent.mkdir(parents=True, exist_ok=True)
+            vocab.save(vocab_path)
+            log.info(f"Saved vocabulary to {vocab_path}")
+    else:
+        log.info("No vocab_path specified. Building vocabulary from dataset...")
+        vocab = build_vocab_from_dataset(dataset, "a", limit=cfg.get("vocab_limit", 10000))
+        # Save to default location
+        results_dir = Path(cfg.get("results_dir", "Results/stage_a"))
+        vocab_path = results_dir / "vocab.txt"
+        vocab_path.parent.mkdir(parents=True, exist_ok=True)
+        vocab.save(vocab_path)
+        log.info(f"Saved vocabulary to {vocab_path}")
+
     model_cfg = load_yaml(Path(cfg["model_config"]))
     model = build_model(vocab, model_cfg)
     device = default_device()
     model.to(device)
-
-    dataset = build_stage_dataset("a", cfg["data"])
     train_cfg = cfg["training"]
     dataloader = make_dataloader(
         dataset,
