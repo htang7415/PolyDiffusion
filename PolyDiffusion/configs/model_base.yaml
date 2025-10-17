@@ -1,8 +1,8 @@
-d_model: 256
+d_model: 128
 n_layers: 8
 n_heads: 8
 dropout: 0.1
-diffusion_steps: 50
+diffusion_steps: 20
 schedule: cosine
 min_noise: 0.05
 max_noise: 0.4
