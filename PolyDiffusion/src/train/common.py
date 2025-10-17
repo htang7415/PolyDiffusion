@@ -271,10 +271,11 @@ def collate_stage_b(records: List[Dict[str, object]], vocab: AnchorSafeVocab) ->
                 ap = convert_polymer_to_ap_smiles(raw)
                 aps.append(ap)
             except ValueError as e:
-                # Log warning but continue - validation will catch this later
-                log.warning(f"Failed to convert polymer SMILES '{raw}': {e}")
-                # Use the raw SMILES as fallback (will likely fail validation)
-                aps.append(raw)
+                log.error("Failed to convert polymer SMILES '%s': %s", raw, e)
+                raise ValueError(
+                    f"Unable to convert polymer SMILES '{raw}' to AP-SMILES. "
+                    "Ensure each repeat unit has exactly two attachment points ('*' or '[*]')."
+                ) from e
 
         # Use synthesis score if available, otherwise default to 0.0
         synth_values = [_extract_optional_float(record, SYNTH_SCORE_KEYS) for record in records]
@@ -326,7 +327,7 @@ def make_dataloader(
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=False,
+        shuffle=True,
         collate_fn=collate_fn,
         num_workers=num_workers,
         pin_memory=pin_memory,

@@ -55,7 +55,8 @@ def main() -> None:
     model_cfg = load_yaml(Path(args.config))
     model = build_model(vocab, model_cfg)
     ckpt = torch.load(args.ckpt, map_location="cpu")
-    model.load_state_dict(ckpt, strict=False)
+    state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
+    model.load_state_dict(state_dict, strict=False)
     if args.device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:

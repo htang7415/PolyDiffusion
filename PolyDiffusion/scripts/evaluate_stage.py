@@ -272,7 +272,8 @@ def sample_and_evaluate(
     model = build_model(vocab, model_cfg)
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    model.load_state_dict(checkpoint, strict=False)
+    state_dict = checkpoint["model_state_dict"] if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint else checkpoint
+    model.load_state_dict(state_dict, strict=False)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)

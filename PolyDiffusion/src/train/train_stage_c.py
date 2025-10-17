@@ -51,21 +51,27 @@ def run_stage_c(config_path: str) -> None:
 
     # Single-property training mode (RECOMMENDED)
     target_property = cfg.get("target_property", None)
+    log = logging.getLogger(__name__)
     if target_property:
-        log = logging.getLogger(__name__)
+        if target_property not in model.config.property_names:
+            raise ValueError(
+                f"Target property '{target_property}' not found in model configuration. "
+                f"Available properties: {list(model.config.property_names)}"
+            )
         log.info(f"Training in SINGLE-PROPERTY mode for: {target_property}")
-        property_names = [target_property]  # Only train on this one property
+        active_properties = [target_property]
     else:
-        log = logging.getLogger(__name__)
+        if not model.config.property_names:
+            raise ValueError("Model configuration must define at least one property name for Stage C training.")
         log.warning("Training in MULTI-PROPERTY mode (all properties). Consider using 'target_property' for better results.")
-        property_names = model.config.property_names
+        active_properties = list(model.config.property_names)
 
-    dataset = build_stage_dataset("c", cfg["data"], property_names=model.config.property_names)
+    dataset = build_stage_dataset("c", cfg["data"], property_names=active_properties)
     train_cfg = cfg["training"]
     dataloader = make_dataloader(
         dataset,
         train_cfg["batch_size"],
-        lambda batch: collate_stage_c(batch, vocab, model.config.property_names),
+        lambda batch: collate_stage_c(batch, vocab, active_properties),
         num_workers=train_cfg.get("num_workers", 0),
         pin_memory=train_cfg.get("pin_memory"),
     )
@@ -126,11 +132,8 @@ def run_stage_c(config_path: str) -> None:
         anchor_count = batch["anchor_count"].to(device)
         valence = batch["valence"].to(device)
 
-        # Only use target property for conditioning if single-property mode
-        if target_property:
-            properties = {target_property: batch["properties"][target_property].to(device)}
-        else:
-            properties = {name: batch["properties"][name].to(device) for name in model.config.property_names}
+        # Move property tensors for conditioning
+        properties = {name: tensor.to(device) for name, tensor in batch["properties"].items()}
 
         timesteps = model.diffusion.sample_timesteps(tokens.size(0))
         noisy_tokens, noise_mask = model.diffusion.q_sample(tokens, timesteps)
