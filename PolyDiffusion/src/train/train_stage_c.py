@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
+import time
 from pathlib import Path
 
 import torch
@@ -28,10 +30,38 @@ from .common import (
     load_pretrained_for_finetuning,
 )
 
+try:  # pragma: no cover
+    import resource
+except ImportError:  # pragma: no cover
+    resource = None
+
+try:  # pragma: no cover
+    import psutil
+except ImportError:  # pragma: no cover
+    psutil = None
+
+
+def _get_peak_memory_mb() -> float:
+    if resource is not None:
+        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if usage:
+            if sys.platform.startswith("darwin"):
+                usage /= 1024.0
+            return usage / 1024.0
+    if psutil is not None:
+        try:
+            rss = psutil.Process().memory_info().rss
+            return rss / (1024.0 * 1024.0)
+        except Exception:  # pragma: no cover
+            pass
+    return 0.0
+
 
 def run_stage_c(config_path: str) -> None:
     cfg = load_yaml(Path(config_path))
     configure_logging()
+
+    start_time = time.perf_counter()
 
     vocab = AnchorSafeVocab.load(Path(cfg["vocab_path"]))
     model_cfg = load_yaml(Path(cfg["model_config"]))
@@ -48,6 +78,8 @@ def run_stage_c(config_path: str) -> None:
 
     device = default_device()
     model.to(device)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     # Single-property training mode (RECOMMENDED)
     target_property = cfg.get("target_property", None)
@@ -197,6 +229,15 @@ def run_stage_c(config_path: str) -> None:
     if "checkpoint_path" in cfg:
         torch.save(model.state_dict(), cfg["checkpoint_path"])
         log.info("Saved checkpoint to %s", cfg["checkpoint_path"])
+
+    elapsed = time.perf_counter() - start_time
+    peak_ram = _get_peak_memory_mb()
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+        peak_cuda = torch.cuda.max_memory_reserved(device) / (1024.0 * 1024.0)
+        log.info("Runtime %.2fs | Peak RAM %.1f MB | Peak CUDA %.1f MB", elapsed, peak_ram, peak_cuda)
+    else:
+        log.info("Runtime %.2fs | Peak RAM %.1f MB", elapsed, peak_ram)
 
 
 def main() -> None:

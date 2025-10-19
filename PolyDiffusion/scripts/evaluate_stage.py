@@ -33,10 +33,12 @@ from typing import Dict, List, Optional, Set
 import torch
 import numpy as np
 
-from PolyDiffusion.chem.ap_smiles import ANCHOR1, ANCHOR2
+from PolyDiffusion.chem.ap_smiles import ANCHOR1, ANCHOR2, unshield_anchors
+from PolyDiffusion.chem.plain_vocab import PlainVocab
 from PolyDiffusion.chem.valence import has_two_anchors
 from PolyDiffusion.chem.vocab import AnchorSafeVocab
-from PolyDiffusion.sampling.sampler import GuidedSampler, SamplerConfig
+from PolyDiffusion.utils.sa_score import calculate_sa_score_batch
+from PolyDiffusion.sampling.sampler import GuidedSampler, PlainSampler, SamplerConfig
 from PolyDiffusion.train.common import build_model, load_yaml
 
 # Try to import RDKit for advanced validation
@@ -44,7 +46,10 @@ try:
     from rdkit import Chem
     from rdkit.Chem import Descriptors, AllChem
     from rdkit import DataStructs
+    from rdkit import RDLogger
     HAS_RDKIT = True
+    RDLogger.DisableLog("rdApp.error")
+    RDLogger.DisableLog("rdApp.warning")
 except ImportError:
     HAS_RDKIT = False
 
@@ -69,10 +74,61 @@ def smiles_to_mol(smiles: str) -> Optional[object]:
         return None
 
 
+def load_samples_from_file(path: Path, stage: str) -> tuple[List[str], List[Dict[str, float]]]:
+    """Load previously generated samples for evaluation."""
+    if not path.exists():
+        raise FileNotFoundError(f"Samples file not found: {path}")
+
+    with path.open("r", encoding="utf-8") as handle:
+        lines = [line.strip() for line in handle if line.strip()]
+
+    if stage == "a":
+        return lines, [{} for _ in lines]
+
+    if stage == "b":
+        ap_smiles: List[str] = []
+        for line in lines:
+            try:
+                ap = unshield_anchors(line)
+            except ValueError:
+                ap = line
+            ap_smiles.append(ap)
+        return ap_smiles, [{} for _ in ap_smiles]
+
+    raise ValueError("Stage C metrics require model predictions; omit --samples for Stage C evaluation.")
+
+
+def prepare_sa_inputs(samples: List[str], stage: str) -> List[str]:
+    if stage == "a":
+        return samples
+    if stage == "b":
+        return [s.replace(ANCHOR1, "C").replace(ANCHOR2, "C") for s in samples]
+    return samples
+
+
+def compute_sa_statistics(samples: List[str], stage: str) -> tuple[Optional[float], Optional[float], int]:
+    if not HAS_RDKIT:
+        return None, None, len(samples)
+    sa_inputs = prepare_sa_inputs(samples, stage)
+    scores = calculate_sa_score_batch(sa_inputs, invalid_value=-1.0, show_progress=False)
+    valid_scores = [score for score in scores if score >= 0]
+    invalid = len(scores) - len(valid_scores)
+    if not valid_scores:
+        return None, None, invalid
+    return float(np.mean(valid_scores)), float(np.std(valid_scores)), invalid
+
+
+def format_stat(value: Optional[float], precision: int = 3) -> str:
+    if value is None:
+        return "N/A"
+    return f"{value:.{precision}f}"
+
+
 def compute_stage_a_metrics(
     samples: List[str],
     predictions: List[Dict[str, float]],
     training_set: Optional[Set[str]] = None,
+    stage: str = "a",
 ) -> Dict[str, float]:
     """Compute Stage A (small molecule) metrics.
 
@@ -98,10 +154,18 @@ def compute_stage_a_metrics(
         metrics["validity_rdkit"] = None
 
     # 2. Synthesizability (mean synthesis score)
-    synth_scores = [p.get("synth", 0.0) for p in predictions]
+    synth_scores = [float(p["synth"]) for p in predictions if p.get("synth") is not None]
     if synth_scores:
-        metrics["synthesizability_mean"] = sum(synth_scores) / len(synth_scores)
-        metrics["synthesizability_std"] = np.std(synth_scores)
+        metrics["synthesizability_mean"] = float(np.mean(synth_scores))
+        metrics["synthesizability_std"] = float(np.std(synth_scores))
+        metrics["synth_source"] = "model_prediction"
+        metrics["sa_invalid_count"] = 0
+    else:
+        sa_mean, sa_std, invalid = compute_sa_statistics(samples, stage)
+        metrics["synthesizability_mean"] = sa_mean
+        metrics["synthesizability_std"] = sa_std
+        metrics["synth_source"] = "rdkit_sa_score" if sa_mean is not None else "unavailable"
+        metrics["sa_invalid_count"] = invalid
 
     # 3. Uniqueness
     unique_samples = set(samples)
@@ -152,7 +216,7 @@ def compute_stage_b_metrics(
     - Anchor Correctness: Fraction with exactly two anchors [*:1] and [*:2]
     """
     # Start with Stage A metrics
-    metrics = compute_stage_a_metrics(samples, predictions, training_set)
+    metrics = compute_stage_a_metrics(samples, predictions, training_set, stage="b")
 
     # Add anchor correctness
     total = len(samples)
@@ -217,10 +281,11 @@ def compute_stage_c_metrics(
             metrics[f"{target_property}_max"] = np.max(values)
 
     # Synthesizability
-    synth_scores = [p.get("synth", 0.0) for p in predictions]
+    synth_scores = [p.get("synth") for p in predictions if p.get("synth") is not None]
     if synth_scores:
-        metrics["synthesizability_mean"] = np.mean(synth_scores)
-        metrics["synthesizability_std"] = np.std(synth_scores)
+        metrics["synthesizability_mean"] = float(np.mean(synth_scores))
+        metrics["synthesizability_std"] = float(np.std(synth_scores))
+        metrics["synth_source"] = "model_prediction"
 
     return metrics
 
@@ -263,11 +328,16 @@ def sample_and_evaluate(
     cfg_scale: float = 1.0,
     gradient_weight: float = 0.0,
     training_data_path: Optional[Path] = None,
+    samples_path: Optional[Path] = None,
 ) -> Dict[str, object]:
     """Sample from a checkpoint and compute stage-specific evaluation metrics."""
 
     logger.info(f"Loading model from {checkpoint_path}")
-    vocab = AnchorSafeVocab.load(vocab_path)
+    stage = stage.lower()
+    if stage == "a":
+        vocab = PlainVocab.load(vocab_path)
+    else:
+        vocab = AnchorSafeVocab.load(vocab_path)
     model_cfg = load_yaml(config_path)
     model = build_model(vocab, model_cfg)
 
@@ -279,26 +349,52 @@ def sample_and_evaluate(
     model.to(device)
 
     sampler_config = SamplerConfig(cfg_scale=cfg_scale, gradient_weight=gradient_weight)
-    sampler = GuidedSampler(model, vocab, sampler_config)
 
-    # Prepare property targets for sampling
+    smiles_list: List[str]
+    predictions: List[Dict[str, float]]
+    results: List[Dict[str, object]] = []
     sample_property_targets = None
-    if target_property and property_targets and target_property in property_targets:
-        min_val, max_val = property_targets[target_property]
-        midpoint = (min_val + max_val) / 2.0
-        sample_property_targets = {target_property: midpoint}
+    used_saved_samples = samples_path is not None
 
-    logger.info(f"Sampling {num_samples} molecules/polymers (steps={num_steps})...")
-    results = sampler.sample(
-        num_samples=num_samples,
-        num_steps=num_steps,
-        property_targets=sample_property_targets,
-        synth_target=synth_target,
-    )
+    if samples_path is not None:
+        if stage == "c":
+            raise ValueError("Stage C evaluation requires fresh sampling to obtain property predictions.")
+        smiles_list, predictions = load_samples_from_file(samples_path, stage)
+        logger.info(f"Loaded {len(smiles_list)} samples from {samples_path}")
+    else:
+        logger.info(f"Sampling {num_samples} molecules/polymers (steps={num_steps})...")
+        if stage == "a":
+            sampler = PlainSampler(model, vocab, sampler_config)
+            results = sampler.sample(
+                num_samples=num_samples,
+                num_steps=num_steps,
+                synth_target=synth_target,
+                cfg_scale=cfg_scale,
+                gradient_weight=gradient_weight,
+            )
+            smiles_list = [r["smiles"] for r in results]
+        else:
+            sampler = GuidedSampler(model, vocab, sampler_config)
+            include_properties = stage == "c"
+            if stage == "c" and target_property and property_targets and target_property in property_targets:
+                min_val, max_val = property_targets[target_property]
+                midpoint = (min_val + max_val) / 2.0
+                sample_property_targets = {target_property: midpoint}
+            if stage == "b" and property_targets:
+                logger.warning("Property targets ignored for Stage B evaluation.")
+            results = sampler.sample(
+                num_samples=num_samples,
+                num_steps=num_steps,
+                property_targets=sample_property_targets if stage == "c" else None,
+                synth_target=synth_target,
+                cfg_scale=cfg_scale,
+                gradient_weight=gradient_weight,
+                include_properties=include_properties,
+            )
+            smiles_list = [r["ap_smiles"] for r in results]
+        predictions = [r.get("prediction", {}) for r in results]
 
-    # Extract data
-    smiles_list = [r["ap_smiles"] for r in results]
-    predictions = [r["prediction"] for r in results]
+    effective_num_samples = len(smiles_list)
 
     # Load training set for novelty
     training_set = None
@@ -310,7 +406,7 @@ def sample_and_evaluate(
     logger.info(f"Computing Stage {stage.upper()} metrics...")
 
     if stage == "a":
-        metrics = compute_stage_a_metrics(smiles_list, predictions, training_set)
+        metrics = compute_stage_a_metrics(smiles_list, predictions, training_set, stage="a")
     elif stage == "b":
         metrics = compute_stage_b_metrics(smiles_list, predictions, training_set)
     elif stage == "c":
@@ -319,18 +415,21 @@ def sample_and_evaluate(
         raise ValueError(f"Unknown stage: {stage}")
 
     # Compile results
+    sample_key = "smiles" if stage == "a" else "ap_smiles"
     evaluation = {
         "stage": stage,
         "checkpoint": str(checkpoint_path),
-        "num_samples": num_samples,
-        "num_steps": num_steps,
-        "cfg_scale": cfg_scale,
-        "gradient_weight": gradient_weight,
+        "num_samples": effective_num_samples,
+        "num_steps": num_steps if not used_saved_samples else None,
+        "cfg_scale": cfg_scale if not used_saved_samples else None,
+        "gradient_weight": gradient_weight if not used_saved_samples else None,
         "target_property": target_property,
         "property_targets": {k: list(v) for k, v in property_targets.items()} if property_targets else None,
         "metrics": metrics,
+        "samples_path": str(samples_path) if samples_path else None,
+        "used_saved_samples": used_saved_samples,
         "samples": [
-            {"ap_smiles": s, "prediction": p}
+            {sample_key: s, "prediction": p}
             for s, p in zip(smiles_list[:10], predictions[:10])
         ],
     }
@@ -362,7 +461,9 @@ def print_evaluation_summary(stage: str, metrics: Dict, target_property: Optiona
         if stage == "b":
             print(f"Anchor Correctness: {metrics.get('anchor_correctness', 0):.2%}")
 
-        print(f"Synthesizability: {metrics.get('synthesizability_mean', 0):.3f} ± {metrics.get('synthesizability_std', 0):.3f}")
+        synth_mean = metrics.get("synthesizability_mean")
+        synth_std = metrics.get("synthesizability_std")
+        print(f"Synthesizability: {format_stat(synth_mean)} ± {format_stat(synth_std)}")
         print(f"Uniqueness: {metrics.get('uniqueness', 0):.2%} ({metrics.get('unique_count', 0)})")
 
         if metrics.get("novelty") is not None:
@@ -387,7 +488,9 @@ def print_evaluation_summary(stage: str, metrics: Dict, target_property: Optiona
                 print(f"  Mean: {metrics[mean_key]:.2f} ± {metrics.get(f'{target_property}_std', 0):.2f}")
                 print(f"  Range: [{metrics.get(f'{target_property}_min', 0):.2f}, {metrics.get(f'{target_property}_max', 0):.2f}]")
 
-        print(f"\nSynthesizability: {metrics.get('synthesizability_mean', 0):.3f} ± {metrics.get('synthesizability_std', 0):.3f}")
+        synth_mean = metrics.get("synthesizability_mean")
+        synth_std = metrics.get("synthesizability_std")
+        print(f"\nSynthesizability: {format_stat(synth_mean)} ± {format_stat(synth_std)}")
 
     print("="*60 + "\n")
 
@@ -420,6 +523,7 @@ Examples:
     parser.add_argument("--num", type=int, default=1000, help="Number of samples")
     parser.add_argument("--steps", type=int, default=10, help="Diffusion steps")
     parser.add_argument("--output", type=str, help="Output JSON path")
+    parser.add_argument("--samples", type=str, help="Path to pre-generated samples (.smi) to evaluate")
 
     # Stage C specific
     parser.add_argument("--target-property", type=str, help="Target property name (Tg, Tm, Td, Eg, chi)")
@@ -457,6 +561,7 @@ Examples:
     config_path = Path(args.config)
     output_path = Path(args.output) if args.output else None
     training_data_path = Path(args.training_data) if args.training_data else None
+    samples_path = Path(args.samples) if args.samples else None
 
     sample_and_evaluate(
         checkpoint_path=checkpoint_path,
@@ -472,6 +577,7 @@ Examples:
         cfg_scale=args.cfg,
         gradient_weight=args.grad,
         training_data_path=training_data_path,
+        samples_path=samples_path,
     )
 
 

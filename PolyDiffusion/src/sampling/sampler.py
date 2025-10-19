@@ -8,6 +8,7 @@ from typing import Dict, Iterable, List, Optional
 import torch
 
 from ..chem.ap_smiles import SHIELD1, SHIELD2
+from ..chem.plain_vocab import PlainVocab
 from ..chem.vocab import AnchorSafeVocab
 from ..sampling.decode import decode_tokens
 from ..models.dit_token import DiffusionTransformer
@@ -61,6 +62,7 @@ class GuidedSampler:
         synth_target: Optional[float] = None,
         cfg_scale: Optional[float] = None,
         gradient_weight: Optional[float] = None,
+        include_properties: bool = True,
     ) -> List[Dict[str, object]]:
         cfg_scale = cfg_scale if cfg_scale is not None else self.config.cfg_scale
         gradient_weight = gradient_weight if gradient_weight is not None else self.config.gradient_weight
@@ -149,7 +151,110 @@ class GuidedSampler:
                     "synth": float(final_outputs["synth_pred"][idx].detach().cpu()),
                 },
             }
-            for name, tensor in final_outputs["property_preds"].items():
-                result["prediction"][name] = float(tensor[idx].detach().cpu())
+            if include_properties:
+                for name, tensor in final_outputs["property_preds"].items():
+                    result["prediction"][name] = float(tensor[idx].detach().cpu())
+            results.append(result)
+        return results
+
+
+class PlainSampler:
+    """Sampling wrapper for Stage A models without anchor tokens."""
+
+    def __init__(self, model: DiffusionTransformer, vocab: PlainVocab, config: Optional[SamplerConfig] = None) -> None:
+        self.model = model.eval()
+        self.vocab = vocab
+        self.config = config or SamplerConfig()
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.model.parameters()).device
+
+    def _prepare_synth_target(self, num_samples: int, synth_target: Optional[float]) -> Optional[torch.Tensor]:
+        if synth_target is None:
+            return None
+        return torch.full((num_samples,), float(synth_target), device=self.device)
+
+    def sample(
+        self,
+        num_samples: int,
+        num_steps: int,
+        synth_target: Optional[float] = None,
+        cfg_scale: Optional[float] = None,
+        gradient_weight: Optional[float] = None,
+    ) -> List[Dict[str, object]]:
+        cfg_scale = cfg_scale if cfg_scale is not None else self.config.cfg_scale
+        gradient_weight = gradient_weight if gradient_weight is not None else self.config.gradient_weight
+
+        s_target_tensor = self._prepare_synth_target(num_samples, synth_target)
+
+        seq_len = self.config.max_length
+        tokens = torch.full((num_samples, seq_len), self.vocab.pad_id, device=self.device, dtype=torch.long)
+        tokens[:, 0] = self.vocab.bos_id
+        tokens[:, -1] = self.vocab.eos_id
+
+        fixed_mask = torch.zeros_like(tokens, dtype=torch.bool)
+        fixed_mask[:, 0] = True
+        fixed_mask[:, -1] = True
+
+        uncond_mask = torch.ones(num_samples, device=self.device, dtype=torch.bool)
+        attention_mask = tokens != self.vocab.pad_id
+        final_outputs = None
+
+        total_steps = max(1, min(num_steps, self.model.diffusion.config.num_steps))
+        for step in reversed(range(total_steps)):
+            timesteps = torch.full((num_samples,), step, device=self.device, dtype=torch.long)
+            use_grad = gradient_weight > 0.0
+            if use_grad:
+                outputs_cond = self.model(tokens, timesteps, attention_mask=attention_mask, properties=None, s_target=s_target_tensor)
+            else:
+                with torch.no_grad():
+                    outputs_cond = self.model(tokens, timesteps, attention_mask=attention_mask, properties=None, s_target=s_target_tensor)
+            with torch.no_grad():
+                outputs_uncond = self.model(
+                    tokens,
+                    timesteps,
+                    attention_mask=attention_mask,
+                    properties=None,
+                    s_target=s_target_tensor,
+                    condition_dropout_mask=uncond_mask,
+                )
+            logits_cond = outputs_cond["logits"]
+            logits_uncond = outputs_uncond["logits"]
+            logits = logits_uncond + cfg_scale * (logits_cond - logits_uncond)
+
+            if gradient_weight > 0.0:
+                logits_cond.requires_grad_(True)
+                guidance_loss = torch.zeros((), device=self.device)
+                if synth_target is not None:
+                    guidance_loss = guidance_loss + torch.relu(outputs_cond["synth_pred"] - float(synth_target)).mean()
+                if guidance_loss.requires_grad:
+                    grad = torch.autograd.grad(guidance_loss, logits_cond, retain_graph=False, allow_unused=True)[0]
+                    if grad is not None:
+                        logits = logits - gradient_weight * grad
+                logits_cond.requires_grad_(False)
+
+            probs = torch.softmax(logits, dim=-1)
+            sampled = torch.argmax(probs, dim=-1)
+            tokens = torch.where(fixed_mask, tokens, sampled).detach()
+            attention_mask = tokens != self.vocab.pad_id
+            final_outputs = {
+                "synth_pred": outputs_cond["synth_pred"].detach(),
+            }
+
+        sequences = tokens.detach().cpu().tolist()
+        smiles = [self.vocab.detokenize(seq) for seq in sequences]
+        results: List[Dict[str, object]] = []
+        if final_outputs is None:
+            dummy = torch.zeros(num_samples, device=self.device)
+            final_outputs = {"synth_pred": dummy}
+        for idx, smile in enumerate(smiles):
+            result = {
+                "smiles": smile,
+                "logits": None,
+                "prediction": {
+                    "synth": float(final_outputs["synth_pred"][idx].detach().cpu()),
+                },
+            }
             results.append(result)
         return results
