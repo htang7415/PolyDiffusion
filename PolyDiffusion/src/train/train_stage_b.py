@@ -175,9 +175,29 @@ def run_stage_b(config_path: str) -> None:
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     train_cfg = cfg["training"]
+    batch_size = train_cfg["batch_size"]
+    micro_batch_size = train_cfg.get("micro_batch_size", batch_size)
+    grad_accum_steps = max(int(train_cfg.get("grad_accum_steps", 1)), 1)
+    if micro_batch_size <= 0:
+        raise ValueError("training.micro_batch_size must be positive.")
+    if grad_accum_steps <= 0:
+        raise ValueError("training.grad_accum_steps must be positive.")
+    if grad_accum_steps > 1 and micro_batch_size * grad_accum_steps != batch_size:
+        log.info(
+            "Using micro_batch_size=%d with grad_accum_steps=%d (effective batch size=%d).",
+            micro_batch_size,
+            grad_accum_steps,
+            micro_batch_size * grad_accum_steps,
+        )
+    elif grad_accum_steps > 1:
+        log.info(
+            "Using gradient accumulation with micro_batch_size=%d and grad_accum_steps=%d.",
+            micro_batch_size,
+            grad_accum_steps,
+        )
     dataloader = make_dataloader(
         dataset,
-        train_cfg["batch_size"],
+        micro_batch_size,
         lambda batch: collate_stage_b(batch, vocab),
         num_workers=train_cfg.get("num_workers", 0),
         pin_memory=train_cfg.get("pin_memory"),
@@ -241,51 +261,60 @@ def run_stage_b(config_path: str) -> None:
     data_iter = iter(dataloader)
     last_logged_losses: dict[str, float] | None = None
     for step in range(start_step, steps):
-        try:
-            batch = next(data_iter)
-        except StopIteration:
-            data_iter = iter(dataloader)
-            batch = next(data_iter)
-
-        tokens = batch["tokens"].to(device)
-        mask = batch["mask"].to(device)
-        synth = batch["synth"].to(device)
-        anchor_count = batch["anchor_count"].to(device)
-        valence = batch["valence"].to(device)
-
-        timesteps = model.diffusion.sample_timesteps(tokens.size(0))
-        noisy_tokens, noise_mask = model.diffusion.q_sample(tokens, timesteps)
         optimizer.zero_grad(set_to_none=True)
+        step_loss_sums: dict[str, float] = {}
 
-        with _autocast(use_amp, torch.float16):
-            outputs = model(noisy_tokens, timesteps, attention_mask=mask, s_target=synth)
-            losses = stage_b_objective(
-                model,
-                outputs,
-                tokens,
-                timesteps,
-                noise_mask,
-                synth,
-                anchor_count,
-                valence,
-                lambda_syn,
-                lambda_gram,
-            )
-            total_loss = losses["total"]
+        for micro_step in range(grad_accum_steps):
+            try:
+                batch = next(data_iter)
+            except StopIteration:
+                data_iter = iter(dataloader)
+                batch = next(data_iter)
+
+            tokens = batch["tokens"].to(device)
+            mask = batch["mask"].to(device)
+            synth = batch["synth"].to(device)
+            anchor_count = batch["anchor_count"].to(device)
+            valence = batch["valence"].to(device)
+
+            timesteps = model.diffusion.sample_timesteps(tokens.size(0))
+            noisy_tokens, noise_mask = model.diffusion.q_sample(tokens, timesteps)
+
+            with _autocast(use_amp, torch.float16):
+                outputs = model(noisy_tokens, timesteps, attention_mask=mask, s_target=synth)
+                losses = stage_b_objective(
+                    model,
+                    outputs,
+                    tokens,
+                    timesteps,
+                    noise_mask,
+                    synth,
+                    anchor_count,
+                    valence,
+                    lambda_syn,
+                    lambda_gram,
+                )
+                total_loss = losses["total"] / grad_accum_steps
+
+            if use_amp:
+                scaler.scale(total_loss).backward()
+            else:
+                total_loss.backward()
+
+            for name, tensor in losses.items():
+                step_loss_sums[name] = step_loss_sums.get(name, 0.0) + float(tensor.detach().cpu())
 
         if use_amp:
-            scaler.scale(total_loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
         else:
-            total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
         scheduler.step()
 
-        loss_values = {name: float(t.detach().cpu()) for name, t in losses.items()}
+        loss_values = {name: value / grad_accum_steps for name, value in step_loss_sums.items()}
         last_logged_losses = loss_values
 
         if step % log_interval == 0:

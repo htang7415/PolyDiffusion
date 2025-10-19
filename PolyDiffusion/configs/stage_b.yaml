@@ -13,9 +13,9 @@ initialization:
 results_dir: Results/stage_b
 
 data:
-  path: Data/PI1M.csv
+  path: Data/PI1M_filtered.csv
   format: csv
-  delimiter: ","
+  delimiter: "\t"
   has_header: true
   limit: null
   shuffle: true
@@ -23,7 +23,9 @@ data:
   seed: 42
 
 training:
-  batch_size: 1024
+  batch_size: 1024          # effective batch size (micro_batch_size * grad_accum_steps)
+  micro_batch_size: 128     # per-device batch size to control GPU memory
+  grad_accum_steps: 4      # accumulate gradients to reach effective batch size
   lr: 2.0e-4
   lr_min: 1.0e-6
   weight_decay: 0.01

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence
 
 import torch
 
@@ -19,6 +19,100 @@ class SamplerConfig:
     max_length: int = 64
     cfg_scale: float = 1.5
     gradient_weight: float = 0.0
+    temperature: float = 1.0
+    early_stop: bool = True
+    min_tokens: int = 2
+
+
+def _sample_from_logits(logits: torch.Tensor, temperature: float) -> torch.Tensor:
+    """
+    Sample token indices from logits with optional temperature scaling.
+
+    When temperature <= 0, falls back to greedy argmax sampling so callers
+    can disable stochasticity.
+    """
+    if temperature <= 0:
+        return torch.argmax(logits, dim=-1)
+    # Detach to avoid autograd tracking during sampling.
+    logits = logits.detach()
+    if temperature != 1.0:
+        logits = logits / float(temperature)
+    # Improve numerical stability before exponentiation.
+    logits = logits - logits.max(dim=-1, keepdim=True).values
+    probs = torch.softmax(logits, dim=-1)
+    probs = probs.reshape(-1, probs.shape[-1])
+    probs_sum = probs.sum(dim=-1, keepdim=True)
+    normalized = probs / torch.clamp(probs_sum, min=1e-12)
+    # Replace zero-sum rows with a uniform distribution to keep multinomial happy.
+    uniform = torch.full_like(probs, 1.0 / probs.shape[-1])
+    probs = torch.where(probs_sum > 1e-12, normalized, uniform)
+    sampled = torch.multinomial(probs, num_samples=1)
+    return sampled.view(*logits.shape[:-1])
+
+
+def _mask_logits(logits: torch.Tensor, forbidden_ids: Sequence[int]) -> torch.Tensor:
+    """Apply a large negative bias to logits for forbidden token ids."""
+    if not forbidden_ids:
+        return logits
+    for token_id in forbidden_ids:
+        if token_id is None or token_id < 0 or token_id >= logits.size(-1):
+            continue
+        logits[..., token_id] = float("-inf")
+    return logits
+
+
+def _apply_early_stopping(
+    tokens: torch.Tensor,
+    frozen_mask: torch.Tensor,
+    finished_rows: torch.Tensor,
+    eos_id: int,
+    pad_id: int,
+    prefix_length: int,
+    min_tokens: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Freeze sequences once the first EOS token appears by padding the tail.
+
+    Args:
+        tokens: Current token matrix (batch, seq_len).
+        frozen_mask: Boolean mask marking positions frozen for future updates.
+        finished_rows: Boolean vector indicating which rows already terminated.
+        eos_id: Vocabulary id for EOS.
+        pad_id: Vocabulary id for PAD.
+
+    Returns:
+        Updated (tokens, frozen_mask, finished_rows).
+    """
+    if tokens.numel() == 0:
+        return tokens, frozen_mask, finished_rows
+
+    batch, seq_len = tokens.shape
+    device = tokens.device
+
+    eos_mask = tokens == eos_id
+    if not torch.any(eos_mask):
+        return tokens, frozen_mask, finished_rows
+
+    positions = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch, -1)
+    first_pos = torch.where(eos_mask, positions, seq_len)
+    first_idx = torch.min(first_pos, dim=1).values
+
+    new_finished = (~finished_rows) & (first_idx < seq_len)
+    if not torch.any(new_finished):
+        return tokens, frozen_mask, finished_rows
+
+    row_indices = new_finished.nonzero(as_tuple=True)[0]
+    for row in row_indices.tolist():
+        eos_position = int(first_idx[row].item())
+        content_tokens = max(0, eos_position - prefix_length)
+        if content_tokens < min_tokens:
+            continue
+        if eos_position + 1 < seq_len:
+            tokens[row, eos_position + 1 :] = pad_id
+        frozen_mask[row, eos_position:] = True
+        finished_rows[row] = True
+
+    return tokens, frozen_mask, finished_rows
 
 
 class GuidedSampler:
@@ -71,19 +165,24 @@ class GuidedSampler:
 
         seq_len = self.config.max_length
         tokens = torch.full((num_samples, seq_len), self.vocab.pad_id, device=self.device, dtype=torch.long)
-        tokens[:, 0] = self.vocab.bos_id
-        tokens[:, 1] = self.vocab.token_to_id[SHIELD1]
-        tokens[:, -2] = self.vocab.token_to_id[SHIELD2]
-        tokens[:, -1] = self.vocab.eos_id
+        bos_id = self.vocab.bos_id
+        eos_id = self.vocab.eos_id
+        pad_id = self.vocab.pad_id
+        shield1_id = self.vocab.token_to_id[SHIELD1]
+
+        tokens[:, 0] = bos_id
+        tokens[:, 1] = shield1_id
+
         anchor_mask = torch.zeros_like(tokens, dtype=torch.bool)
         anchor_mask[:, 0] = True
         anchor_mask[:, 1] = True
-        anchor_mask[:, -2] = True
-        anchor_mask[:, -1] = True
+
+        frozen_mask = torch.zeros_like(tokens, dtype=torch.bool)
+        finished_rows = torch.zeros(num_samples, dtype=torch.bool, device=self.device)
 
         uncond_mask = torch.ones(num_samples, device=self.device, dtype=torch.bool)
 
-        attention_mask = tokens != self.vocab.pad_id
+        attention_mask = tokens != pad_id
         final_outputs = None
 
         total_steps = max(1, min(num_steps, self.model.diffusion.config.num_steps))
@@ -124,15 +223,34 @@ class GuidedSampler:
                         logits = logits - gradient_weight * grad
                 logits_cond.requires_grad_(False)
 
-            probs = torch.softmax(logits, dim=-1)
-            sampled = torch.argmax(probs, dim=-1)
-            update_mask = ~anchor_mask
+            forbidden_ids = [
+                pad_id,
+                self.vocab.mask_id,
+                self.vocab.token_to_id.get("<UNK>"),
+            ]
+            logits = _mask_logits(logits, forbidden_ids)
+            sampled = _sample_from_logits(logits, self.config.temperature)
+            update_mask = ~(anchor_mask | frozen_mask)
             tokens = torch.where(update_mask, sampled, tokens).detach()
-            attention_mask = tokens != self.vocab.pad_id
+            tokens[:, 0] = bos_id
+            tokens[:, 1] = shield1_id
+            if self.config.early_stop:
+                tokens, frozen_mask, finished_rows = _apply_early_stopping(
+                    tokens,
+                    frozen_mask,
+                    finished_rows,
+                    eos_id,
+                    pad_id,
+                    prefix_length=2,
+                    min_tokens=self.config.min_tokens,
+                )
+            attention_mask = tokens != pad_id
             final_outputs = {
                 "synth_pred": outputs_cond["synth_pred"].detach(),
                 "property_preds": {name: tensor.detach() for name, tensor in outputs_cond["property_preds"].items()},
             }
+            if self.config.early_stop and torch.all(finished_rows):
+                break
 
         sequences = tokens.detach().cpu().tolist()
         smiles = decode_tokens(self.vocab, sequences)
@@ -190,15 +308,20 @@ class PlainSampler:
 
         seq_len = self.config.max_length
         tokens = torch.full((num_samples, seq_len), self.vocab.pad_id, device=self.device, dtype=torch.long)
-        tokens[:, 0] = self.vocab.bos_id
-        tokens[:, -1] = self.vocab.eos_id
+        bos_id = self.vocab.bos_id
+        eos_id = self.vocab.eos_id
+        pad_id = self.vocab.pad_id
+
+        tokens[:, 0] = bos_id
 
         fixed_mask = torch.zeros_like(tokens, dtype=torch.bool)
         fixed_mask[:, 0] = True
-        fixed_mask[:, -1] = True
+
+        frozen_mask = torch.zeros_like(tokens, dtype=torch.bool)
+        finished_rows = torch.zeros(num_samples, dtype=torch.bool, device=self.device)
 
         uncond_mask = torch.ones(num_samples, device=self.device, dtype=torch.bool)
-        attention_mask = tokens != self.vocab.pad_id
+        attention_mask = tokens != pad_id
         final_outputs = None
 
         total_steps = max(1, min(num_steps, self.model.diffusion.config.num_steps))
@@ -234,13 +357,32 @@ class PlainSampler:
                         logits = logits - gradient_weight * grad
                 logits_cond.requires_grad_(False)
 
-            probs = torch.softmax(logits, dim=-1)
-            sampled = torch.argmax(probs, dim=-1)
-            tokens = torch.where(fixed_mask, tokens, sampled).detach()
-            attention_mask = tokens != self.vocab.pad_id
+            forbidden_ids = [
+                pad_id,
+                self.vocab.mask_id,
+                self.vocab.token_to_id.get("<UNK>"),
+            ]
+            logits = _mask_logits(logits, forbidden_ids)
+            sampled = _sample_from_logits(logits, self.config.temperature)
+            update_mask = ~(fixed_mask | frozen_mask)
+            tokens = torch.where(update_mask, sampled, tokens).detach()
+            tokens[:, 0] = bos_id
+            if self.config.early_stop:
+                tokens, frozen_mask, finished_rows = _apply_early_stopping(
+                    tokens,
+                    frozen_mask,
+                    finished_rows,
+                    eos_id,
+                    pad_id,
+                    prefix_length=1,
+                    min_tokens=self.config.min_tokens,
+                )
+            attention_mask = tokens != pad_id
             final_outputs = {
                 "synth_pred": outputs_cond["synth_pred"].detach(),
             }
+            if self.config.early_stop and torch.all(finished_rows):
+                break
 
         sequences = tokens.detach().cpu().tolist()
         smiles = [self.vocab.detokenize(seq) for seq in sequences]

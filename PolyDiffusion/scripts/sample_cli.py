@@ -9,13 +9,15 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import torch
 
+from PolyDiffusion.chem.ap_smiles import SHIELD1, SHIELD2
 from PolyDiffusion.chem.plain_vocab import PlainVocab
 from PolyDiffusion.chem.vocab import AnchorSafeVocab
 from PolyDiffusion.sampling.sampler import GuidedSampler, PlainSampler, SamplerConfig
+from PolyDiffusion.utils.sa_score import RDKIT_AVAILABLE, calculate_sa_score_batch
 from PolyDiffusion.train.common import build_model, load_yaml
 from PolyDiffusion.scripts.evaluate_stage import (
     compute_stage_a_metrics,
@@ -57,6 +59,8 @@ STAGE_METRIC_KEYS = {
     ],
 }
 
+_SA_WARNING_EMITTED = False
+
 
 def _get_peak_memory_mb() -> float:
     if resource is not None:
@@ -97,6 +101,50 @@ def parse_targets(target_str: Optional[str]) -> Dict[str, float]:
     return targets
 
 
+def _prepare_sa_inputs(structures: List[str], stage: str) -> List[str]:
+    stage = stage.lower()
+    if stage == "a":
+        return [s or "" for s in structures]
+    capped: List[str] = []
+    for structure in structures:
+        if not structure:
+            capped.append("")
+        else:
+            capped.append(structure.replace(SHIELD1, "C").replace(SHIELD2, "C"))
+    return capped
+
+
+def _attach_sa_scores(
+    structures: List[str],
+    predictions: List[Dict[str, float]],
+    stage: str,
+) -> Optional[List[float]]:
+    global _SA_WARNING_EMITTED
+    if not RDKIT_AVAILABLE:
+        if not _SA_WARNING_EMITTED:
+            print("RDKit not available; skipping SA score calculation.", file=sys.stderr)
+            _SA_WARNING_EMITTED = True
+        return None
+
+    sa_inputs = _prepare_sa_inputs(structures, stage)
+    scores = calculate_sa_score_batch(sa_inputs, invalid_value=-1.0, show_progress=False)
+    for pred, score in zip(predictions, scores):
+        if pred is None:
+            continue
+        if "synth_model" not in pred and pred.get("synth") is not None:
+            pred["synth_model"] = pred.get("synth")
+        if score >= 0:
+            pred["synth"] = float(score)
+            pred["synth_source"] = "rdkit_sa"
+            pred["sa_score_rdkit"] = float(score)
+        else:
+            pred.setdefault("synth_source", "model_prediction" if pred.get("synth") is not None else "unavailable")
+            pred["sa_score_rdkit"] = None
+            if pred.get("synth") is None and pred.get("synth_model") is not None:
+                pred["synth"] = pred["synth_model"]
+    return scores
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sample molecules/polymers from trained PolyDiffusion checkpoints.")
     parser.add_argument("--ckpt", required=True, type=str, help="Checkpoint path.")
@@ -108,10 +156,12 @@ def main() -> None:
     parser.add_argument("--s_target", default=None, type=float, help="Synthesis score target.")
     parser.add_argument("--cfg", default=1.5, type=float, help="CFG scale.")
     parser.add_argument("--grad", default=0.0, type=float, help="Gradient guidance weight.")
+    parser.add_argument("--temperature", default=1.0, type=float, help="Sampling temperature (<=0 for greedy decoding).")
     parser.add_argument("--device", default="auto", type=str, help="Target device (auto/cpu/cuda).")
     parser.add_argument("--stage", type=str, choices=["a", "b", "c"], required=True, help="Training stage of the checkpoint.")
     parser.add_argument("--output", type=str, help="Write sampled structures (one per line).")
-    parser.add_argument("--max-length", type=int, default=64, help="Maximum token length during sampling (default: 64).")
+    parser.add_argument("--max-length", type=int, default=96, help="Maximum token length during sampling (default: 64).")
+    parser.add_argument("--min-tokens", type=int, default=2, help="Minimum non-special tokens required before terminating a sequence.")
     parser.add_argument("--print-samples", action="store_true", help="Print sampled structures to stdout.")
     args = parser.parse_args()
 
@@ -137,7 +187,13 @@ def main() -> None:
     model.to(device)
     if device.type == "cuda":  # reset peak tracking for clean measurement
         torch.cuda.reset_peak_memory_stats(device)
-    sampler_cfg = SamplerConfig(max_length=args.max_length, cfg_scale=args.cfg, gradient_weight=args.grad)
+    sampler_cfg = SamplerConfig(
+        max_length=args.max_length,
+        cfg_scale=args.cfg,
+        gradient_weight=args.grad,
+        temperature=args.temperature,
+        min_tokens=max(0, args.min_tokens),
+    )
 
     property_targets = parse_targets(args.targets)
 
@@ -171,6 +227,7 @@ def main() -> None:
 
     structures = [item.get(display_key, "") for item in results]
     predictions = [item.get("prediction", {}) for item in results]
+    sa_scores = _attach_sa_scores(structures, predictions, stage)
 
     # Compute stage-specific metrics from sampled structures.
     if stage == "a":
@@ -207,9 +264,16 @@ def main() -> None:
     if args.print_samples:
         for structure, prediction in zip(structures, predictions):
             synth = prediction.get("synth")
-            extras = {k: v for k, v in prediction.items() if k != "synth"}
+            extras: List[str] = []
+            for key, value in prediction.items():
+                if key in {"synth", "synth_model"} or value is None:
+                    continue
+                if isinstance(value, (int, float)):
+                    extras.append(f"{key}={value:.3f}")
+                else:
+                    extras.append(f"{key}={value}")
             if extras:
-                extra_str = ", ".join(f"{k}={v:.3f}" for k, v in extras.items())
+                extra_str = ", ".join(extras)
                 print(f"{structure} | synth={synth:.3f} | {extra_str}")
             else:
                 print(f"{structure} | synth={synth:.3f}")
@@ -223,6 +287,9 @@ def main() -> None:
     summary_parts.append(f"peak RAM {peak_ram:.1f} MB")
     if device.type == "cuda":
         summary_parts.append(f"peak CUDA {peak_cuda:.1f} MB")
+    if sa_scores is not None:
+        valid_sa = sum(1 for score in sa_scores if score is not None and score >= 0)
+        summary_parts.append(f"RDKit SA {valid_sa}/{len(sa_scores)}")
     print(" | ".join(summary_parts))
 
 
