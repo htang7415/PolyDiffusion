@@ -6,7 +6,7 @@ diffusion_steps: 50
 schedule: cosine
 min_noise: 0.05
 max_noise: 0.4
-cfg_dropout: 0.1
+cfg_dropout: 0.2
 use_flow_matching: false
 self_conditioning: true
 property_names:

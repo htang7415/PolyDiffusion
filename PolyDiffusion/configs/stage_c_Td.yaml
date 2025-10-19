@@ -1,7 +1,7 @@
 # Stage C Configuration: Td (Decomposition Temperature) Property Training
 
-vocab_path: vocab.txt
-model_config: configs/model_base.yaml
+vocab_path: PolyDiffusion/vocab_stage_bc.txt
+model_config: PolyDiffusion/configs/model_base.yaml
 target_property: Td
 pretrained_checkpoint: Results/stage_b/best_model.pt
 freeze_backbone: false

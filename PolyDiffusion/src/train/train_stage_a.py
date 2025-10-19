@@ -7,6 +7,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -92,9 +93,31 @@ def run_stage_a(config_path: str) -> None:
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     train_cfg = cfg["training"]
+    batch_size = train_cfg["batch_size"]
+    micro_batch_size = train_cfg.get("micro_batch_size", batch_size)
+    grad_accum_steps = max(int(train_cfg.get("grad_accum_steps", 1)), 1)
+    if micro_batch_size <= 0:
+        raise ValueError("training.micro_batch_size must be positive.")
+    if grad_accum_steps <= 0:
+        raise ValueError("training.grad_accum_steps must be positive.")
+
+    if grad_accum_steps > 1 and micro_batch_size * grad_accum_steps != batch_size:
+        log.info(
+            "Using micro_batch_size=%d with grad_accum_steps=%d (effective batch size=%d).",
+            micro_batch_size,
+            grad_accum_steps,
+            micro_batch_size * grad_accum_steps,
+        )
+    elif grad_accum_steps > 1:
+        log.info(
+            "Using gradient accumulation with micro_batch_size=%d and grad_accum_steps=%d.",
+            micro_batch_size,
+            grad_accum_steps,
+        )
+
     dataloader = make_dataloader(
         dataset,
-        train_cfg["batch_size"],
+        micro_batch_size,
         lambda batch: collate_stage_a(batch, vocab),
         num_workers=train_cfg.get("num_workers", 0),
         pin_memory=train_cfg.get("pin_memory"),
@@ -135,61 +158,100 @@ def run_stage_a(config_path: str) -> None:
 
     # Gradient clipping
     max_grad_norm = train_cfg.get("max_grad_norm", 1.0)
+    use_amp = train_cfg.get("use_amp", True) and device.type == "cuda"
+
+    try:
+        from torch import amp as torch_amp  # torch>=2.0 preferred API
+
+        GradScalerCls = torch_amp.GradScaler
+
+        def _autocast(enabled: bool, dtype: torch.dtype) -> Callable:
+            return torch_amp.autocast(device_type="cuda", dtype=dtype, enabled=enabled)
+
+    except (ImportError, AttributeError, TypeError):  # pragma: no cover - fallback for older torch
+        from torch.cuda.amp import GradScaler as GradScalerCls, autocast as torch_autocast  # type: ignore
+
+        def _autocast(enabled: bool, dtype: torch.dtype) -> Callable:
+            return torch_autocast(enabled=enabled, dtype=dtype)
+
+    scaler = GradScalerCls(enabled=use_amp)
 
     model.train()
 
     data_iter = iter(dataloader)
+    last_logged_losses: dict[str, float] | None = None
     for step in range(start_step, steps):
-        try:
-            batch = next(data_iter)
-        except StopIteration:
-            data_iter = iter(dataloader)
-            batch = next(data_iter)
+        optimizer.zero_grad(set_to_none=True)
+        step_loss_sums: dict[str, float] = {}
 
-        tokens = batch["tokens"].to(device)
-        mask = batch["mask"].to(device)
-        synth = batch["synth"].to(device)
+        for micro_step in range(grad_accum_steps):
+            try:
+                batch = next(data_iter)
+            except StopIteration:
+                data_iter = iter(dataloader)
+                batch = next(data_iter)
 
-        timesteps = model.diffusion.sample_timesteps(tokens.size(0))
-        noisy_tokens, noise_mask = model.diffusion.q_sample(tokens, timesteps)
-        outputs = model(noisy_tokens, timesteps, attention_mask=mask, s_target=synth)
-        losses = stage_a_objective(model, outputs, tokens, timesteps, noise_mask, synth, lambda_syn)
+            tokens = batch["tokens"].to(device)
+            mask = batch["mask"].to(device)
+            synth = batch["synth"].to(device)
 
-        optimizer.zero_grad()
-        losses["total"].backward()
+            timesteps = model.diffusion.sample_timesteps(tokens.size(0))
+            noisy_tokens, noise_mask = model.diffusion.q_sample(tokens, timesteps)
 
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            with _autocast(use_amp, torch.float16):
+                outputs = model(noisy_tokens, timesteps, attention_mask=mask, s_target=synth)
+                losses = stage_a_objective(model, outputs, tokens, timesteps, noise_mask, synth, lambda_syn)
+                total_loss = losses["total"] / grad_accum_steps
 
-        optimizer.step()
+            if use_amp:
+                scaler.scale(total_loss).backward()
+            else:
+                total_loss.backward()
+
+            for name, value in losses.items():
+                step_loss_sums[name] = step_loss_sums.get(name, 0.0) + float(value.detach().cpu())
+
+        if use_amp:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            optimizer.step()
+
         scheduler.step()
+
+        loss_values = {name: value / grad_accum_steps for name, value in step_loss_sums.items()}
+        last_logged_losses = loss_values
 
         if step % log_interval == 0:
             current_lr = optimizer.param_groups[0]['lr']
             log.info(
                 "step=%d loss_total=%.4f loss_diff=%.4f loss_syn=%.4f lr=%.2e",
                 step,
-                float(losses["total"]),
-                float(losses["diffusion"]),
-                float(losses["synth"]),
+                loss_values.get("total", float("nan")),
+                loss_values.get("diffusion", float("nan")),
+                loss_values.get("synth", float("nan")),
                 current_lr,
             )
 
         # Save periodic checkpoints
         if (step + 1) % save_interval == 0:
             checkpoint_path = results_dir / f"checkpoint_step_{step+1}.pt"
-            save_checkpoint(checkpoint_path, model, optimizer, scheduler, step + 1, losses["total"].item())
+            save_checkpoint(checkpoint_path, model, optimizer, scheduler, step + 1, loss_values.get("total", float("nan")))
             log.info(f"Saved checkpoint to {checkpoint_path}")
 
         # Save best model
-        if losses["total"].item() < best_loss:
-            best_loss = losses["total"].item()
+        if loss_values.get("total", float("inf")) < best_loss:
+            best_loss = loss_values["total"]
             save_checkpoint(best_checkpoint_path, model, optimizer, scheduler, step + 1, best_loss)
             log.info(f"Saved best model with loss {best_loss:.4f}")
 
     # Save final checkpoint
     final_checkpoint_path = results_dir / "final_model.pt"
-    save_checkpoint(final_checkpoint_path, model, optimizer, scheduler, steps, losses["total"].item())
+    final_loss = last_logged_losses["total"] if last_logged_losses is not None else 0.0
+    save_checkpoint(final_checkpoint_path, model, optimizer, scheduler, steps, final_loss)
     log.info(f"Training completed. Final checkpoint saved to {final_checkpoint_path}")
 
     # Legacy checkpoint path support

@@ -1,22 +1,29 @@
-vocab_path: vocab.txt
-model_config: configs/model_base.yaml
+vocab_path: PolyDiffusion/vocab_stage_bc.txt
+model_config: PolyDiffusion/configs/model_base.yaml
 
-# Load pretrained Stage A model for transfer learning
-pretrained_checkpoint: Results/stage_a/best_model.pt
-freeze_backbone: false  # Set to true to freeze backbone and only train heads
+initialization:
+  mode: stage_a  # options: stage_a, scratch
+  checkpoint: Results/stage_a/best_model.pt
+  vocab_path: PolyDiffusion/vocab.txt   # Stage A vocabulary for weight remapping
+  freeze_backbone: false        # true = freeze transformer backbone, train heads only
+  reuse_token_embeddings: true  # copy shared tokens from Stage A embedding matrix
+  reuse_output_head: true       # copy decoder logits for overlapping tokens
 
 # Results directory for checkpoints
 results_dir: Results/stage_b
 
 data:
-  path: data/pi1m.jsonl.gz
+  path: Data/PI1M.csv
+  format: csv
+  delimiter: ","
+  has_header: true
   limit: null
   shuffle: true
   cache_in_memory: true
   seed: 42
 
 training:
-  batch_size: 2048
+  batch_size: 1024
   lr: 2.0e-4
   lr_min: 1.0e-6
   weight_decay: 0.01
@@ -26,9 +33,10 @@ training:
   max_grad_norm: 1.0
   num_workers: 4
   pin_memory: true
+  use_amp: true
 
 loss:
-  lambda_syn: 0.5
+  lambda_syn: 0.0  # disable synthesis regression when SA Score is unused
   lambda_gram: 0.1
 
 # Optional: Resume from checkpoint if training interrupted

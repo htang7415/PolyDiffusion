@@ -7,6 +7,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -88,15 +89,86 @@ def run_stage_b(config_path: str) -> None:
 
     model_cfg = load_yaml(Path(cfg["model_config"]))
 
-    # Load pretrained Stage A model if specified
-    if "pretrained_checkpoint" in cfg and cfg["pretrained_checkpoint"]:
-        pretrained_path = Path(cfg["pretrained_checkpoint"])
-        freeze_backbone = cfg.get("freeze_backbone", False)
-        model = load_pretrained_for_finetuning(pretrained_path, vocab, model_cfg, freeze_backbone)
-        log = logging.getLogger(__name__)
-        log.info(f"Loaded pretrained model from {pretrained_path}")
-    else:
+    init_cfg = cfg.get("initialization") or {}
+    if "mode" not in init_cfg and "stage_a" in init_cfg:
+        stage_a_cfg = init_cfg.get("stage_a") or {}
+        stage_a_cfg.setdefault("mode", "stage_a")
+        init_cfg = stage_a_cfg
+
+    mode = (init_cfg.get("mode") or "").lower()
+    if not mode:
+        if cfg.get("pretrained_checkpoint"):
+            mode = "stage_a"
+            init_cfg = {
+                "mode": "stage_a",
+                "checkpoint": cfg["pretrained_checkpoint"],
+                "vocab_path": cfg.get("pretrained_vocab_path"),
+                "freeze_backbone": cfg.get("freeze_backbone", False),
+                "reuse_token_embeddings": cfg.get("reuse_token_embeddings", True),
+                "reuse_output_head": cfg.get("reuse_output_head", True),
+            }
+        else:
+            mode = "scratch"
+
+    if mode == "stage_a":
+        checkpoint_value = init_cfg.get("checkpoint")
+        if not checkpoint_value:
+            raise ValueError("Stage B initialization mode 'stage_a' requires a 'checkpoint' path.")
+        pretrained_path = Path(checkpoint_value)
+        if not pretrained_path.exists():
+            raise FileNotFoundError(f"Stage A checkpoint not found: {pretrained_path}")
+
+        vocab_candidate = init_cfg.get("vocab_path")
+        stage_a_vocab_path: Path | None = None
+        if vocab_candidate:
+            candidate_path = Path(vocab_candidate)
+            if not candidate_path.exists():
+                raise FileNotFoundError(f"Specified Stage A vocab_path does not exist: {candidate_path}")
+            stage_a_vocab_path = candidate_path
+        else:
+            fallback_candidates = [
+                pretrained_path.parent / "vocab.txt",
+                Path("Results/stage_a/vocab.txt"),
+            ]
+            for candidate in fallback_candidates:
+                if candidate and candidate.exists():
+                    stage_a_vocab_path = candidate
+                    break
+        if stage_a_vocab_path is None:
+            raise FileNotFoundError(
+                "Unable to locate Stage A vocabulary file. "
+                "Specify 'initialization.vocab_path' in the config."
+            )
+
+        freeze_backbone = init_cfg.get("freeze_backbone")
+        if freeze_backbone is None:
+            freeze_backbone = cfg.get("freeze_backbone", False)
+        reuse_token_embeddings = init_cfg.get("reuse_token_embeddings", True)
+        reuse_output_head = init_cfg.get("reuse_output_head", True)
+
+        model = load_pretrained_for_finetuning(
+            pretrained_path,
+            vocab,
+            model_cfg,
+            freeze_backbone=freeze_backbone,
+            source_vocab_path=stage_a_vocab_path,
+            reuse_token_embeddings=reuse_token_embeddings,
+            reuse_output_head=reuse_output_head,
+        )
+        log.info(
+            "Initialized Stage B model from Stage A checkpoint %s (reuse_token_embeddings=%s, reuse_output_head=%s).",
+            pretrained_path,
+            reuse_token_embeddings,
+            reuse_output_head,
+        )
+    elif mode == "scratch":
         model = build_model(vocab, model_cfg)
+        log.info("Initialized Stage B model from scratch (no Stage A checkpoint).")
+    else:
+        raise ValueError(
+            f"Unsupported initialization mode '{mode}'. "
+            "Choose 'scratch' or 'stage_a' under the 'initialization' section."
+        )
 
     device = default_device()
     model.to(device)
@@ -144,12 +216,30 @@ def run_stage_b(config_path: str) -> None:
     best_loss = float('inf')
     best_checkpoint_path = results_dir / "best_model.pt"
 
-    # Gradient clipping
+    # Gradient clipping / AMP configuration
     max_grad_norm = train_cfg.get("max_grad_norm", 1.0)
+    use_amp = train_cfg.get("use_amp", True) and device.type == "cuda"
+
+    try:
+        from torch import amp as torch_amp  # torch>=2.0 preferred API
+
+        GradScalerCls = torch_amp.GradScaler
+
+        def _autocast(enabled: bool, dtype: torch.dtype) -> Callable:
+            return torch_amp.autocast(device_type="cuda", dtype=dtype, enabled=enabled)
+
+    except (ImportError, AttributeError, TypeError):  # pragma: no cover - fallback for older torch
+        from torch.cuda.amp import GradScaler as GradScalerCls, autocast as torch_autocast  # type: ignore[attr-defined]
+
+        def _autocast(enabled: bool, dtype: torch.dtype) -> Callable:
+            return torch_autocast(enabled=enabled, dtype=dtype)
+
+    scaler = GradScalerCls(enabled=use_amp)
 
     model.train()
 
     data_iter = iter(dataloader)
+    last_logged_losses: dict[str, float] | None = None
     for step in range(start_step, steps):
         try:
             batch = next(data_iter)
@@ -165,53 +255,75 @@ def run_stage_b(config_path: str) -> None:
 
         timesteps = model.diffusion.sample_timesteps(tokens.size(0))
         noisy_tokens, noise_mask = model.diffusion.q_sample(tokens, timesteps)
-        outputs = model(noisy_tokens, timesteps, attention_mask=mask, s_target=synth)
-        losses = stage_b_objective(
-            model,
-            outputs,
-            tokens,
-            timesteps,
-            noise_mask,
-            synth,
-            anchor_count,
-            valence,
-            lambda_syn,
-            lambda_gram,
-        )
+        optimizer.zero_grad(set_to_none=True)
 
-        optimizer.zero_grad()
-        losses["total"].backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-        optimizer.step()
+        with _autocast(use_amp, torch.float16):
+            outputs = model(noisy_tokens, timesteps, attention_mask=mask, s_target=synth)
+            losses = stage_b_objective(
+                model,
+                outputs,
+                tokens,
+                timesteps,
+                noise_mask,
+                synth,
+                anchor_count,
+                valence,
+                lambda_syn,
+                lambda_gram,
+            )
+            total_loss = losses["total"]
+
+        if use_amp:
+            scaler.scale(total_loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            optimizer.step()
         scheduler.step()
+
+        loss_values = {name: float(t.detach().cpu()) for name, t in losses.items()}
+        last_logged_losses = loss_values
 
         if step % log_interval == 0:
             current_lr = optimizer.param_groups[0]['lr']
             log.info(
                 "step=%d loss_total=%.4f loss_diff=%.4f loss_syn=%.4f loss_gram=%.4f lr=%.2e",
                 step,
-                float(losses["total"]),
-                float(losses["diffusion"]),
-                float(losses["synth"]),
-                float(losses["grammar"]),
+                loss_values.get("total", float("nan")),
+                loss_values.get("diffusion", float("nan")),
+                loss_values.get("synth", float("nan")),
+                loss_values.get("grammar", float("nan")),
                 current_lr,
             )
 
         # Save periodic checkpoints
         if (step + 1) % save_interval == 0:
             checkpoint_path = results_dir / f"checkpoint_step_{step+1}.pt"
-            save_checkpoint(checkpoint_path, model, optimizer, scheduler, step + 1, losses["total"].item())
+            save_checkpoint(
+                checkpoint_path,
+                model,
+                optimizer,
+                scheduler,
+                step + 1,
+                loss_values.get("total", float("nan")),
+            )
             log.info(f"Saved checkpoint to {checkpoint_path}")
 
         # Save best model
-        if losses["total"].item() < best_loss:
-            best_loss = losses["total"].item()
+        current_total = loss_values.get("total")
+        if current_total is not None and current_total < best_loss:
+            best_loss = current_total
             save_checkpoint(best_checkpoint_path, model, optimizer, scheduler, step + 1, best_loss)
             log.info(f"Saved best model with loss {best_loss:.4f}")
 
     # Save final checkpoint
     final_checkpoint_path = results_dir / "final_model.pt"
-    save_checkpoint(final_checkpoint_path, model, optimizer, scheduler, steps, losses["total"].item())
+    final_loss = last_logged_losses["total"] if last_logged_losses is not None else 0.0
+    save_checkpoint(final_checkpoint_path, model, optimizer, scheduler, steps, final_loss)
     log.info(f"Training completed. Final checkpoint saved to {final_checkpoint_path}")
 
     # Legacy checkpoint path support

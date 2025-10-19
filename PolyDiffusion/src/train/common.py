@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, Iterable, List, MutableMapping, Optional, Sequence
+from typing import Dict, Iterable, List, MutableMapping, Optional, Sequence, Tuple
 
 import torch
 import yaml
@@ -19,6 +19,7 @@ from ..data.collate import collate_token_batch
 from ..data.datasets import CsvDataset, DatasetConfig, JsonlDataset
 from ..models.dit_token import DiffusionTransformer, ModelConfig
 from ..models.diffusion_token import DiffusionConfig
+from ..utils.fileio import open_compressed
 
 
 PROPERTY_NAMES = ["Tg", "Tm", "Td", "Eg", "chi"]
@@ -29,20 +30,39 @@ SYNTH_SCORE_KEYS: Sequence[str] = ("synth_score", "SA_Score", "SA Score")
 Record = MutableMapping[str, object]
 
 
+def _sniff_dataset_format(path: Path) -> str:
+    """Fallback format detection by peeking at the file contents."""
+    with open_compressed(path, "rt") as handle:
+        for _ in range(32):
+            line = handle.readline()
+            if not line:
+                break
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("{") or stripped.startswith("["):
+                return "jsonl"
+            if "," in stripped or "\t" in stripped:
+                return "csv"
+    raise ValueError(
+        "Unable to infer dataset format from contents. "
+        f"Please rename the file with a .csv/.tsv/.jsonl extension or specify 'format' in the config. (path={path})"
+    )
+
+
 def _infer_dataset_format(path: Path) -> str:
     """Infer whether a dataset should be parsed as CSV or JSONL."""
     suffixes = [suffix.lower() for suffix in path.suffixes]
     while suffixes and suffixes[-1] in COMPRESSION_SUFFIXES:
         suffixes.pop()
-    if not suffixes:
-        # Default to JSONL when no informative suffix remains.
-        return "jsonl"
-    last = suffixes[-1]
-    if last in (".jsonl", ".json"):
-        return "jsonl"
-    if last in (".csv", ".tsv"):
-        return "csv"
-    raise ValueError(f"Unsupported dataset format for path: {path}")
+    if suffixes:
+        last = suffixes[-1]
+        if last in (".jsonl", ".json"):
+            return "jsonl"
+        if last in (".csv", ".tsv"):
+            return "csv"
+        raise ValueError(f"Unsupported dataset format for path: {path}")
+    return _sniff_dataset_format(path)
 
 
 def _find_first_key(record: Record, candidates: Sequence[str]) -> Optional[str]:
@@ -190,8 +210,16 @@ def build_stage_dataset(
         shuffle=data_cfg.get("shuffle", True),
         cache_in_memory=data_cfg.get("cache_in_memory", True),
         seed=data_cfg.get("seed"),
+        delimiter=data_cfg.get("delimiter"),
+        fieldnames=data_cfg.get("fieldnames"),
+        has_header=data_cfg.get("has_header", True),
     )
-    dataset_format = _infer_dataset_format(config.path)
+    dataset_format = data_cfg.get("format")
+    if dataset_format is None:
+        dataset_format = _infer_dataset_format(config.path)
+    dataset_format = dataset_format.lower()
+    if dataset_format not in {"csv", "jsonl"}:
+        raise ValueError(f"Unsupported dataset format '{dataset_format}'. Expected 'csv' or 'jsonl'.")
     dataset_cls = CsvDataset if dataset_format == "csv" else JsonlDataset
 
     if stage == "a":
@@ -372,6 +400,89 @@ def save_checkpoint(
     torch.save(checkpoint, path)
 
 
+def _load_vocab_auto(path: Path) -> PlainVocab | AnchorSafeVocab:
+    """Load a vocabulary file without requiring the caller to know the class."""
+    tokens = path.read_text(encoding="utf-8").splitlines()
+    if "[Zz]" in tokens and "[Zr]" in tokens:
+        return AnchorSafeVocab(tokens)
+    return PlainVocab(tokens)
+
+
+def _transfer_vocab_parameters(
+    model: DiffusionTransformer,
+    state_dict: Dict[str, torch.Tensor],
+    target_vocab: PlainVocab | AnchorSafeVocab,
+    source_vocab: PlainVocab | AnchorSafeVocab,
+    reuse_token_embeddings: bool,
+    reuse_output_head: bool,
+) -> Tuple[int, int]:
+    """Map shared tokens between vocabularies for embeddings and decoder head."""
+    log = logging.getLogger(__name__)
+
+    transferred_embeddings = 0
+    transferred_logits = 0
+
+    if reuse_token_embeddings and "token_embed.weight" in state_dict:
+        source_embed = state_dict["token_embed.weight"]
+        target_embed = model.token_embed.weight.data
+        if source_embed.shape[1] != target_embed.shape[1]:
+            log.warning(
+                "Skipping token embedding transfer due to hidden size mismatch "
+                "(source=%d, target=%d).",
+                source_embed.shape[1],
+                target_embed.shape[1],
+            )
+        else:
+            for token, target_idx in target_vocab.token_to_id.items():
+                source_idx = source_vocab.token_to_id.get(token)
+                if source_idx is None:
+                    continue
+                if source_idx >= source_embed.shape[0] or target_idx >= target_embed.shape[0]:
+                    continue
+                target_embed[target_idx].copy_(source_embed[source_idx])
+                transferred_embeddings += 1
+            log.info(
+                "Transferred embeddings for %d/%d tokens from source vocabulary.",
+                transferred_embeddings,
+                len(target_vocab),
+            )
+    else:
+        log.info("Skipping token embedding transfer (reuse_token_embeddings=%s or source missing weights).", reuse_token_embeddings)
+
+    if reuse_output_head and "head.weight" in state_dict:
+        source_weight = state_dict["head.weight"]
+        target_weight = model.head.weight.data
+        if source_weight.shape[1] != target_weight.shape[1]:
+            log.warning(
+                "Skipping decoder head transfer due to hidden size mismatch "
+                "(source=%d, target=%d).",
+                source_weight.shape[1],
+                target_weight.shape[1],
+            )
+        else:
+            for token, target_idx in target_vocab.token_to_id.items():
+                source_idx = source_vocab.token_to_id.get(token)
+                if source_idx is None:
+                    continue
+                if source_idx >= source_weight.shape[0] or target_idx >= target_weight.shape[0]:
+                    continue
+                target_weight[target_idx].copy_(source_weight[source_idx])
+                transferred_logits += 1
+            log.info("Transferred decoder weights for %d/%d tokens.", transferred_logits, len(target_vocab))
+            if "head.bias" in state_dict:
+                source_bias = state_dict["head.bias"]
+                target_bias = model.head.bias.data
+                for token, target_idx in target_vocab.token_to_id.items():
+                    source_idx = source_vocab.token_to_id.get(token)
+                    if source_idx is None or source_idx >= source_bias.shape[0] or target_idx >= target_bias.shape[0]:
+                        continue
+                    target_bias[target_idx] = source_bias[source_idx]
+    else:
+        log.info("Skipping decoder head transfer (reuse_output_head=%s or source missing weights).", reuse_output_head)
+
+    return transferred_embeddings, transferred_logits
+
+
 def load_checkpoint(
     path: Path,
     model: DiffusionTransformer,
@@ -425,6 +536,9 @@ def load_pretrained_for_finetuning(
     vocab: AnchorSafeVocab,
     model_cfg: dict,
     freeze_backbone: bool = False,
+    source_vocab_path: Optional[Path] = None,
+    reuse_token_embeddings: bool = True,
+    reuse_output_head: bool = True,
 ) -> DiffusionTransformer:
     """Load a pretrained checkpoint for fine-tuning.
 
@@ -433,6 +547,10 @@ def load_pretrained_for_finetuning(
         vocab: Vocabulary (must match checkpoint).
         model_cfg: Model configuration dict.
         freeze_backbone: If True, freeze transformer backbone parameters.
+        source_vocab_path: Optional path to the vocabulary used when training the checkpoint.
+            When provided, token/decoder weights are remapped for shared tokens.
+        reuse_token_embeddings: Copy token embedding rows that exist in both vocabularies.
+        reuse_output_head: Copy decoder weight/bias rows for shared tokens.
 
     Returns:
         Model with loaded weights.
@@ -443,9 +561,35 @@ def load_pretrained_for_finetuning(
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
     if "model_state_dict" in checkpoint:
-        model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        state_dict = checkpoint["model_state_dict"]
     else:
-        model.load_state_dict(checkpoint, strict=False)
+        state_dict = checkpoint
+
+    if source_vocab_path is not None:
+        source_vocab = _load_vocab_auto(source_vocab_path)
+        log.info(
+            "Remapping checkpoint weights using source vocabulary at %s (%d tokens) -> target vocabulary (%d tokens).",
+            source_vocab_path,
+            len(source_vocab),
+            len(vocab),
+        )
+        _transfer_vocab_parameters(
+            model,
+            state_dict,
+            target_vocab=vocab,
+            source_vocab=source_vocab,
+            reuse_token_embeddings=reuse_token_embeddings,
+            reuse_output_head=reuse_output_head,
+        )
+        state_dict = {
+            key: value for key, value in state_dict.items() if key not in {"token_embed.weight", "head.weight", "head.bias"}
+        }
+
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if missing:
+        log.info("Missing parameters while loading checkpoint: %s", ", ".join(sorted(missing)))
+    if unexpected:
+        log.info("Ignoring unexpected parameters from checkpoint: %s", ", ".join(sorted(unexpected)))
 
     log.info(f"Loaded pretrained model from {checkpoint_path}")
 

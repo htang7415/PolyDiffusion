@@ -1,8 +1,8 @@
 # Stage C Configuration: Tg (Glass Transition Temperature) Property Training
 # This config trains a model specifically for Tg property prediction and generation
 
-vocab_path: vocab.txt
-model_config: configs/model_base.yaml
+vocab_path: PolyDiffusion/vocab_stage_bc.txt
+model_config: PolyDiffusion/configs/model_base.yaml
 
 # IMPORTANT: Specify target property for single-property training
 target_property: Tg

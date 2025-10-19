@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import csv
+import itertools
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, MutableMapping
+from typing import Iterable, List, MutableMapping, Sequence
 
 from torch.utils.data import Dataset
 
@@ -24,6 +25,9 @@ class DatasetConfig:
     shuffle: bool = False
     cache_in_memory: bool = True
     seed: int | None = None
+    delimiter: str | None = None
+    fieldnames: Sequence[str] | None = None
+    has_header: bool = True
 
     def ensure_exists(self) -> None:
         if not self.path.exists():
@@ -83,15 +87,38 @@ class CsvDataset(_BaseDataset):
     def _load_records(self) -> List[Record]:
         records: List[Record] = []
         limit = self.config.limit
+        delimiter = self.config.delimiter or ","
+        fieldnames = list(self.config.fieldnames) if self.config.fieldnames is not None else None
+        has_header = self.config.has_header
+
         with open_compressed(self.config.path, "rt") as handle:
-            reader = csv.DictReader(handle)
-            for idx, row in enumerate(reader):
-                record: Record = dict(row)
-                if self.required_fields:
-                    self._validate_record(record, idx)
-                records.append(record)
-                if limit is not None and len(records) >= limit:
-                    break
+            if has_header:
+                reader = csv.DictReader(handle, delimiter=delimiter)
+                for idx, row in enumerate(reader):
+                    record: Record = dict(row)
+                    if self.required_fields:
+                        self._validate_record(record, idx)
+                    records.append(record)
+                    if limit is not None and len(records) >= limit:
+                        break
+            else:
+                row_reader = csv.reader(handle, delimiter=delimiter)
+                try:
+                    first_row = next(row_reader)
+                except StopIteration:
+                    first_row = None
+                if first_row is None:
+                    pass
+                else:
+                    if fieldnames is None:
+                        fieldnames = [f"column_{i}" for i in range(len(first_row))]
+                    for idx, row in enumerate(itertools.chain([first_row], row_reader)):
+                        record = {fieldnames[i]: row[i] for i in range(min(len(fieldnames), len(row)))}
+                        if self.required_fields:
+                            self._validate_record(record, idx)
+                        records.append(record)
+                        if limit is not None and len(records) >= limit:
+                            break
         if not records:
             raise RuntimeError(f"No records found in dataset: {self.config.path}")
         return records
