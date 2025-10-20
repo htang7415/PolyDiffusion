@@ -6,6 +6,9 @@ from typing import Dict, Iterable, Optional
 
 import torch
 from torch import nn
+import torch.nn.functional as F
+
+from ..chem.ap_smiles import SHIELD1, SHIELD2
 
 
 def diffusion_ce(model, outputs, x0, timesteps, mask) -> torch.Tensor:
@@ -55,12 +58,47 @@ def property_loss(
     return torch.stack(losses).mean()
 
 
-def grammar_penalty(anchor_count: torch.Tensor, valence_flag: torch.Tensor) -> torch.Tensor:
-    ones = torch.ones_like(anchor_count, dtype=torch.float32)
-    zeros = torch.zeros_like(anchor_count, dtype=torch.float32)
-    anchors_term = torch.where(anchor_count == 2, zeros, ones)
-    valence_term = 1.0 - valence_flag.float()
-    return (anchors_term + valence_term).mean()
+def _anchor_supervision_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    vocab,
+) -> torch.Tensor:
+    shield1_id = vocab.token_to_id[SHIELD1]
+    shield2_id = vocab.token_to_id[SHIELD2]
+    mask = (targets == shield1_id) | (targets == shield2_id)
+    if not torch.any(mask):
+        return logits.new_tensor(0.0)
+    selected_logits = logits[mask]
+    selected_targets = targets[mask]
+    return F.cross_entropy(selected_logits, selected_targets)
+
+
+def _grammar_head_loss(
+    grammar_logits: Optional[torch.Tensor],
+    anchor_count: torch.Tensor,
+    valence_flag: torch.Tensor,
+) -> torch.Tensor:
+    if grammar_logits is None:
+        return anchor_count.new_tensor(0.0, dtype=torch.float32)
+    target = ((anchor_count == 2) & (valence_flag > 0.5)).float()
+    target = target.to(grammar_logits.dtype)
+    return F.binary_cross_entropy_with_logits(grammar_logits, target)
+
+
+def grammar_penalty(
+    outputs: Dict[str, torch.Tensor],
+    x0: torch.Tensor,
+    anchor_count: torch.Tensor,
+    valence_flag: torch.Tensor,
+    vocab,
+) -> torch.Tensor:
+    anchor_loss = _anchor_supervision_loss(outputs["logits"], x0, vocab)
+    grammar_logits = outputs.get("grammar_logits")
+    if grammar_logits is None and "grammar_pred" in outputs:
+        probs = torch.clamp(outputs["grammar_pred"], 1e-4, 1.0 - 1e-4)
+        grammar_logits = torch.logit(probs)
+    grammar_loss = _grammar_head_loss(grammar_logits, anchor_count, valence_flag)
+    return anchor_loss + grammar_loss
 
 
 def stage_a_objective(
@@ -91,9 +129,10 @@ def stage_b_objective(
     valence_flag: torch.Tensor,
     lambda_syn: float,
     lambda_gram: float,
+    vocab,
 ) -> Dict[str, torch.Tensor]:
     losses = stage_a_objective(model, outputs, x0, timesteps, mask, synth_target, lambda_syn)
-    gram = grammar_penalty(anchor_count, valence_flag)
+    gram = grammar_penalty(outputs, x0, anchor_count, valence_flag, vocab)
     losses["grammar"] = gram
     losses["total"] = losses["total"] + lambda_gram * gram
     return losses
@@ -112,6 +151,7 @@ def stage_c_objective(
     lambda_syn: float,
     lambda_prop: float,
     lambda_gram: float,
+    vocab,
     target_property: Optional[str] = None,
 ) -> Dict[str, torch.Tensor]:
     """Stage C objective for property-guided generation.
@@ -125,7 +165,7 @@ def stage_c_objective(
     prop = property_loss(outputs["property_preds"], property_targets, target_property)
     losses["properties"] = prop
     losses["total"] = losses["total"] + lambda_prop * prop
-    gram = grammar_penalty(anchor_count, valence_flag)
+    gram = grammar_penalty(outputs, x0, anchor_count, valence_flag, vocab)
     losses["grammar"] = gram
     losses["total"] = losses["total"] + lambda_gram * gram
     return losses

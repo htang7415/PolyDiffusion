@@ -126,13 +126,15 @@ class DiffusionTransformer(nn.Module):
         pooled = pooled_representation(hidden, attention_mask)
         property_preds = self.property_heads(pooled)
         synth_pred = self.synth_head(pooled)
-        grammar_pred = self.grammar_head(pooled)
+        grammar_logits = self.grammar_head(pooled)
+        grammar_pred = torch.sigmoid(grammar_logits)
 
         return {
             "logits": logits,
             "pooled": pooled,
             "property_preds": property_preds,
             "synth_pred": synth_pred,
+            "grammar_logits": grammar_logits,
             "grammar_pred": grammar_pred,
             "cond_emb": cond_emb,
         }

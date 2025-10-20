@@ -13,7 +13,7 @@ from typing import Dict, List, Optional
 
 import torch
 
-from PolyDiffusion.chem.ap_smiles import SHIELD1, SHIELD2
+from PolyDiffusion.chem.ap_smiles import SHIELD1, SHIELD2, convert_polymer_to_ap_smiles
 from PolyDiffusion.chem.plain_vocab import PlainVocab
 from PolyDiffusion.chem.vocab import AnchorSafeVocab
 from PolyDiffusion.sampling.sampler import GuidedSampler, PlainSampler, SamplerConfig
@@ -110,7 +110,14 @@ def _prepare_sa_inputs(structures: List[str], stage: str) -> List[str]:
         if not structure:
             capped.append("")
         else:
-            capped.append(structure.replace(SHIELD1, "C").replace(SHIELD2, "C"))
+            capped.append(
+                structure.replace(SHIELD1, "C")
+                .replace(SHIELD2, "C")
+                .replace("[*:1]", "C")
+                .replace("[*:2]", "C")
+                .replace("[*]", "C")
+                .replace("*", "C")
+            )
     return capped
 
 
@@ -145,10 +152,91 @@ def _attach_sa_scores(
     return scores
 
 
+def _ap_to_plain(ap_smiles: str) -> str:
+    if not ap_smiles:
+        return ap_smiles
+    return ap_smiles.replace("[*:1]", "*").replace("[*:2]", "*")
+
+
+def _plain_to_ap(smiles: str) -> str:
+    if not smiles:
+        return ""
+    try:
+        return convert_polymer_to_ap_smiles(smiles)
+    except ValueError:
+        return ""
+
+
+def _format_structure(structure: str, stage: str, anchor_format: str) -> str:
+    if not structure:
+        return structure
+    if stage in {"b", "c"} and anchor_format == "plain":
+        return structure.replace("[*:1]", "*").replace("[*:2]", "*")
+    return structure
+
+
+def _resolve_vocab_path(stage: str, ckpt_path: Path, vocab_arg: Optional[str]) -> Path:
+    stage = stage.lower()
+    candidates: List[Path] = []
+    if vocab_arg:
+        candidates.append(Path(vocab_arg))
+
+    if ckpt_path:
+        candidates.append(ckpt_path.parent / "vocab.txt")
+
+    stage_defaults = {
+        "a": Path("PolyDiffusion/vocab.txt"),
+        "b": Path("PolyDiffusion/vocab_stage_bc.txt"),
+        "c": Path("PolyDiffusion/vocab_stage_bc.txt"),
+    }
+    if stage in stage_defaults:
+        candidates.append(stage_defaults[stage])
+
+    # Preserve order while removing duplicate string representations
+    seen: set[str] = set()
+    ordered_candidates: List[Path] = []
+    for candidate in candidates:
+        expanded = candidate.expanduser()
+        key = str(expanded)
+        if key not in seen:
+            seen.add(key)
+            ordered_candidates.append(expanded)
+
+    for idx, candidate in enumerate(ordered_candidates):
+        if candidate.exists():
+            if idx == 0:
+                return candidate
+            if ckpt_path and vocab_arg and idx == 1:
+                message = (
+                    "[sample_cli] Provided vocabulary path was not found. "
+                    f"Using checkpoint directory fallback: {candidate}"
+                )
+            elif ckpt_path and idx == 1:
+                message = (
+                    "[sample_cli] Vocabulary file not found in the expected checkpoint directory; "
+                    f"using fallback: {candidate}"
+                )
+            else:
+                prefix = "Provided vocabulary path was not found. " if vocab_arg else ""
+                message = f"[sample_cli] {prefix}Using stage default vocabulary: {candidate}"
+            print(message, file=sys.stderr)
+            return candidate
+
+    searched = "\n  ".join(str(path) for path in ordered_candidates)
+    raise FileNotFoundError(
+        "Unable to locate a vocabulary file for sampling. Checked the following locations:\n"
+        f"  {searched}"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sample molecules/polymers from trained PolyDiffusion checkpoints.")
     parser.add_argument("--ckpt", required=True, type=str, help="Checkpoint path.")
-    parser.add_argument("--vocab", required=True, type=str, help="Vocabulary file.")
+    parser.add_argument(
+        "--vocab",
+        type=str,
+        help="Vocabulary file. If omitted, attempts to infer from the checkpoint folder or stage defaults.",
+    )
     parser.add_argument("--config", default="configs/model_base.yaml", type=str, help="Model config YAML.")
     parser.add_argument("--num", default=10, type=int, help="Number of samples.")
     parser.add_argument("--steps", default=10, type=int, help="Diffusion steps.")
@@ -162,13 +250,30 @@ def main() -> None:
     parser.add_argument("--output", type=str, help="Write sampled structures (one per line).")
     parser.add_argument("--max-length", type=int, default=96, help="Maximum token length during sampling (default: 64).")
     parser.add_argument("--min-tokens", type=int, default=2, help="Minimum non-special tokens required before terminating a sequence.")
-    parser.add_argument("--print-samples", action="store_true", help="Print sampled structures to stdout.")
+    parser.add_argument(
+        "--min-sample-length",
+        type=int,
+        help="Minimum non-special token count (excluding BOS and first anchor) before EOS is encouraged.",
+    )
+    parser.add_argument(
+        "--max-sample-length",
+        type=int,
+        help="Maximum non-special token count (excluding BOS and first anchor) before EOS is encouraged.",
+    )
+    parser.add_argument(
+        "--anchor-format",
+        type=str,
+        default="labeled",
+        choices=["labeled", "plain"],
+        help="Stage B/C only: choose 'labeled' for [*:1]/[*:2] anchors (default) or 'plain' for bare '*' attachment points in outputs.",
+    )
     args = parser.parse_args()
 
     start_time = time.perf_counter()
 
     stage = args.stage.lower()
-    vocab_path = Path(args.vocab)
+    ckpt_path = Path(args.ckpt)
+    vocab_path = _resolve_vocab_path(stage, ckpt_path, args.vocab)
     model_cfg = load_yaml(Path(args.config))
 
     if stage == "a":
@@ -187,12 +292,25 @@ def main() -> None:
     model.to(device)
     if device.type == "cuda":  # reset peak tracking for clean measurement
         torch.cuda.reset_peak_memory_stats(device)
+    min_tokens = max(0, args.min_tokens)
+    if args.min_tokens == parser.get_default("min_tokens") and stage in {"b", "c"}:
+        min_tokens = max(min_tokens, 6)  # ensure polymer outputs emit anchor + payload tokens
+
+    if (
+        args.min_sample_length is not None
+        and args.max_sample_length is not None
+        and args.max_sample_length < args.min_sample_length
+    ):
+        parser.error("--max-sample-length must be >= --min-sample-length")
+
     sampler_cfg = SamplerConfig(
         max_length=args.max_length,
         cfg_scale=args.cfg,
         gradient_weight=args.grad,
         temperature=args.temperature,
-        min_tokens=max(0, args.min_tokens),
+        min_tokens=min_tokens,
+        target_length_min=args.min_sample_length,
+        target_length_max=args.max_sample_length,
     )
 
     property_targets = parse_targets(args.targets)
@@ -227,22 +345,43 @@ def main() -> None:
 
     structures = [item.get(display_key, "") for item in results]
     predictions = [item.get("prediction", {}) for item in results]
-    sa_scores = _attach_sa_scores(structures, predictions, stage)
+    ap_structures = structures
+    if stage == "a":
+        plain_structures = ap_structures
+    else:
+        plain_structures = [_ap_to_plain(s) for s in ap_structures]
+
+    if stage == "a":
+        metrics_structures = plain_structures
+    else:
+        metrics_structures = [_plain_to_ap(s) for s in plain_structures]
+
+    sa_structures = metrics_structures if stage == "a" else plain_structures
+    sa_scores = _attach_sa_scores(sa_structures, predictions, stage)
 
     # Compute stage-specific metrics from sampled structures.
     if stage == "a":
-        metrics = compute_stage_a_metrics(structures, predictions, training_set=None, stage="a")
+        metrics = compute_stage_a_metrics(metrics_structures, predictions, training_set=None, stage="a")
     elif stage == "b":
-        metrics = compute_stage_b_metrics(structures, predictions, training_set=None)
+        metrics = compute_stage_b_metrics(metrics_structures, predictions, training_set=None)
     else:
-        metrics = compute_stage_c_metrics(structures, predictions, property_targets=None, target_property=None)
+        metrics = compute_stage_c_metrics(metrics_structures, predictions, property_targets=None, target_property=None)
 
     if args.output:
         out_path = Path(args.output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with out_path.open("w", encoding="utf-8") as handle:
-            for structure in structures:
+            for structure in plain_structures:
                 handle.write(f"{structure}\n")
+        ap_output_path: Optional[Path] = None
+        if stage in {"b", "c"}:
+            if out_path.name.lower() == "samples.smi":
+                ap_output_path = out_path.with_name("AP-samples.smi")
+            else:
+                ap_output_path = out_path.with_name(f"{out_path.stem}_ap{out_path.suffix}")
+            with ap_output_path.open("w", encoding="utf-8") as handle:
+                for ap_smiles in ap_structures:
+                    handle.write(f"{ap_smiles}\n")
         metrics_path = out_path.with_name("metrics.csv")
         metric_keys = STAGE_METRIC_KEYS.get(stage, sorted(metrics.keys()))
         with metrics_path.open("w", encoding="utf-8", newline="") as handle:
@@ -253,6 +392,7 @@ def main() -> None:
                 writer.writerow([key, "" if value is None else value])
     else:
         metrics_path = None
+        ap_output_path = None
 
     elapsed = time.perf_counter() - start_time
     peak_ram = _get_peak_memory_mb()
@@ -261,26 +401,11 @@ def main() -> None:
         torch.cuda.synchronize(device)
         peak_cuda = torch.cuda.max_memory_reserved(device) / (1024.0 * 1024.0)
 
-    if args.print_samples:
-        for structure, prediction in zip(structures, predictions):
-            synth = prediction.get("synth")
-            extras: List[str] = []
-            for key, value in prediction.items():
-                if key in {"synth", "synth_model"} or value is None:
-                    continue
-                if isinstance(value, (int, float)):
-                    extras.append(f"{key}={value:.3f}")
-                else:
-                    extras.append(f"{key}={value}")
-            if extras:
-                extra_str = ", ".join(extras)
-                print(f"{structure} | synth={synth:.3f} | {extra_str}")
-            else:
-                print(f"{structure} | synth={synth:.3f}")
-
-    summary_parts = [f"{len(structures)} samples"]
+    summary_parts = [f"{len(plain_structures)} samples"]
     if args.output:
         summary_parts.append(f"samples → {args.output}")
+        if ap_output_path is not None:
+            summary_parts.append(f"ap-samples → {ap_output_path}")
         if metrics_path:
             summary_parts.append(f"metrics → {metrics_path}")
     summary_parts.append(f"elapsed {elapsed:.2f}s")

@@ -52,22 +52,19 @@ def calculate_sa_score(smiles: str) -> float:
         7.2
     """
     if not RDKIT_AVAILABLE:
-        logger.error(
-            "RDKit not available. Install with: conda install -c conda-forge rdkit"
-        )
+        logger.debug("RDKit not available. Install with: conda install -c conda-forge rdkit")
         return -1.0
 
     try:
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
-            logger.warning(f"Invalid SMILES: {smiles}")
             return -1.0
 
         score = sascorer.calculateScore(mol)
         return float(score)
 
     except Exception as e:
-        logger.warning(f"SA score calculation failed for '{smiles}': {e}")
+        logger.debug("SA score calculation failed for '%s': %s", smiles, e)
         return -1.0
 
 
@@ -94,9 +91,7 @@ def calculate_sa_score_batch(
         [1.0, 2.3, 2.8]
     """
     if not RDKIT_AVAILABLE:
-        logger.error(
-            "RDKit not available. Install with: conda install -c conda-forge rdkit"
-        )
+        logger.debug("RDKit not available. Install with: conda install -c conda-forge rdkit")
         return [invalid_value] * len(smiles_list)
 
     scores = []

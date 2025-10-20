@@ -106,6 +106,34 @@ def prepare_sa_inputs(samples: List[str], stage: str) -> List[str]:
     return samples
 
 
+def attach_sa_scores(
+    samples: List[str],
+    predictions: List[Dict[str, float]],
+    stage: str,
+) -> Optional[List[float]]:
+    """Attach RDKit SA scores to prediction dictionaries when available."""
+    if not samples:
+        return None
+    sa_inputs = prepare_sa_inputs(samples, stage)
+    scores = calculate_sa_score_batch(sa_inputs, invalid_value=-1.0, show_progress=False)
+    for pred, score in zip(predictions, scores):
+        if pred is None:
+            continue
+        synth_pred = pred.get("synth")
+        if synth_pred is not None and "synth_model" not in pred:
+            pred["synth_model"] = synth_pred
+        if score >= 0:
+            pred["synth"] = float(score)
+            pred["synth_source"] = "rdkit_sa"
+            pred["sa_score_rdkit"] = float(score)
+        else:
+            pred.setdefault("synth_source", "model_prediction" if synth_pred is not None else "unavailable")
+            pred["sa_score_rdkit"] = None
+            if pred.get("synth") is None and pred.get("synth_model") is not None:
+                pred["synth"] = pred["synth_model"]
+    return scores
+
+
 def compute_sa_statistics(samples: List[str], stage: str) -> tuple[Optional[float], Optional[float], int]:
     if not HAS_RDKIT:
         return None, None, len(samples)
@@ -154,12 +182,30 @@ def compute_stage_a_metrics(
         metrics["validity_rdkit"] = None
 
     # 2. Synthesizability (mean synthesis score)
-    synth_scores = [float(p["synth"]) for p in predictions if p.get("synth") is not None]
+    synth_scores: List[float] = []
+    synth_sources: Set[str] = set()
+    sa_invalid = 0
+    for pred in predictions:
+        if pred is None:
+            continue
+        synth = pred.get("synth")
+        if synth is None:
+            continue
+        synth_scores.append(float(synth))
+        source = pred.get("synth_source")
+        if source:
+            synth_sources.add(str(source))
+        if source == "rdkit_sa" and pred.get("sa_score_rdkit") is None:
+            sa_invalid += 1
     if synth_scores:
         metrics["synthesizability_mean"] = float(np.mean(synth_scores))
         metrics["synthesizability_std"] = float(np.std(synth_scores))
-        metrics["synth_source"] = "model_prediction"
-        metrics["sa_invalid_count"] = 0
+        if "rdkit_sa" in synth_sources:
+            metrics["synth_source"] = "rdkit_sa"
+            metrics["sa_invalid_count"] = sa_invalid
+        else:
+            metrics["synth_source"] = "model_prediction"
+            metrics["sa_invalid_count"] = 0
     else:
         sa_mean, sa_std, invalid = compute_sa_statistics(samples, stage)
         metrics["synthesizability_mean"] = sa_mean
@@ -320,7 +366,10 @@ def sample_and_evaluate(
     config_path: Path,
     num_samples: int,
     num_steps: int,
+    max_length: int,
+    min_tokens: int,
     stage: str,
+    temperature: float,
     output_path: Optional[Path] = None,
     property_targets: Optional[Dict[str, tuple]] = None,
     target_property: Optional[str] = None,
@@ -348,7 +397,13 @@ def sample_and_evaluate(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    sampler_config = SamplerConfig(cfg_scale=cfg_scale, gradient_weight=gradient_weight)
+    sampler_config = SamplerConfig(
+        max_length=max_length,
+        cfg_scale=cfg_scale,
+        gradient_weight=gradient_weight,
+        temperature=temperature,
+        min_tokens=min_tokens,
+    )
 
     smiles_list: List[str]
     predictions: List[Dict[str, float]]
@@ -393,6 +448,8 @@ def sample_and_evaluate(
             )
             smiles_list = [r["ap_smiles"] for r in results]
         predictions = [r.get("prediction", {}) for r in results]
+
+    attach_sa_scores(smiles_list, predictions, stage)
 
     effective_num_samples = len(smiles_list)
 
@@ -524,6 +581,9 @@ Examples:
     parser.add_argument("--steps", type=int, default=10, help="Diffusion steps")
     parser.add_argument("--output", type=str, help="Output JSON path")
     parser.add_argument("--samples", type=str, help="Path to pre-generated samples (.smi) to evaluate")
+    parser.add_argument("--max-length", type=int, default=96, help="Maximum token length during sampling")
+    parser.add_argument("--min-tokens", type=int, default=2, help="Minimum non-special tokens before allowing EOS")
+    parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature (<=0 for greedy decoding)")
 
     # Stage C specific
     parser.add_argument("--target-property", type=str, help="Target property name (Tg, Tm, Td, Eg, chi)")
@@ -563,13 +623,21 @@ Examples:
     training_data_path = Path(args.training_data) if args.training_data else None
     samples_path = Path(args.samples) if args.samples else None
 
+    min_tokens = max(0, args.min_tokens)
+    default_min_tokens = parser.get_default("min_tokens")
+    if args.min_tokens == default_min_tokens and args.stage in {"b", "c"}:
+        min_tokens = max(min_tokens, 6)
+
     sample_and_evaluate(
         checkpoint_path=checkpoint_path,
         vocab_path=vocab_path,
         config_path=config_path,
         num_samples=args.num,
         num_steps=args.steps,
+        max_length=args.max_length,
+        min_tokens=min_tokens,
         stage=args.stage,
+        temperature=args.temperature,
         output_path=output_path,
         property_targets=property_targets,
         target_property=args.target_property,

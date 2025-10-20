@@ -2,7 +2,7 @@ vocab_path: PolyDiffusion/vocab_stage_bc.txt
 model_config: PolyDiffusion/configs/model_base.yaml
 
 initialization:
-  mode: stage_a  # options: stage_a, scratch
+  mode: scratch  # options: stage_a, scratch
   checkpoint: Results/stage_a/best_model.pt
   vocab_path: PolyDiffusion/vocab.txt   # Stage A vocabulary for weight remapping
   freeze_backbone: false        # true = freeze transformer backbone, train heads only
@@ -23,17 +23,17 @@ data:
   seed: 42
 
 training:
-  batch_size: 1024          # effective batch size (micro_batch_size * grad_accum_steps)
+  batch_size: 2048          # effective batch size (micro_batch_size * grad_accum_steps)
   micro_batch_size: 128     # per-device batch size to control GPU memory
   grad_accum_steps: 4      # accumulate gradients to reach effective batch size
   lr: 2.0e-4
   lr_min: 1.0e-6
   weight_decay: 0.01
-  steps: 500
-  log_interval: 50
-  save_interval: 250  # Save checkpoint every 250 steps
+  steps: 50000
+  log_interval: 1000
+  save_interval: 10000  # Save checkpoint every 250 steps
   max_grad_norm: 1.0
-  num_workers: 4
+  num_workers: 32
   pin_memory: true
   use_amp: true
 

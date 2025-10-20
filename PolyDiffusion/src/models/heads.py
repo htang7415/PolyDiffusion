@@ -66,4 +66,4 @@ class GrammarHead(nn.Module):
         self.head = MLPHead(input_dim, 1)
 
     def forward(self, pooled: torch.Tensor) -> torch.Tensor:
-        return torch.sigmoid(self.head(pooled).squeeze(-1))
+        return self.head(pooled).squeeze(-1)

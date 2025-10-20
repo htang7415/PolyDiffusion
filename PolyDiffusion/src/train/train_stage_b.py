@@ -12,6 +12,7 @@ from typing import Callable
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
+from ..chem.ap_smiles import SHIELD1, SHIELD2
 from ..chem.vocab import AnchorSafeVocab
 from ..losses.objectives import stage_b_objective
 from ..utils.logging import configure_logging
@@ -232,6 +233,13 @@ def run_stage_b(config_path: str) -> None:
     results_dir.mkdir(parents=True, exist_ok=True)
     log.info(f"Results will be saved to {results_dir}")
 
+    results_vocab_path = results_dir / "vocab.txt"
+    try:
+        vocab.save(results_vocab_path)
+        log.info(f"Synced vocabulary to {results_vocab_path}")
+    except OSError as exc:
+        log.warning("Failed to write vocabulary copy to results directory: %s", exc)
+
     # Best model tracking
     best_loss = float('inf')
     best_checkpoint_path = results_dir / "best_model.pt"
@@ -279,6 +287,10 @@ def run_stage_b(config_path: str) -> None:
 
             timesteps = model.diffusion.sample_timesteps(tokens.size(0))
             noisy_tokens, noise_mask = model.diffusion.q_sample(tokens, timesteps)
+            anchor_mask_tokens = (tokens == vocab.token_to_id[SHIELD1]) | (tokens == vocab.token_to_id[SHIELD2])
+            if torch.any(anchor_mask_tokens):
+                noise_mask = noise_mask | anchor_mask_tokens
+                noisy_tokens = noisy_tokens.masked_fill(anchor_mask_tokens, vocab.mask_id)
 
             with _autocast(use_amp, torch.float16):
                 outputs = model(noisy_tokens, timesteps, attention_mask=mask, s_target=synth)
@@ -293,6 +305,7 @@ def run_stage_b(config_path: str) -> None:
                     valence,
                     lambda_syn,
                     lambda_gram,
+                    vocab,
                 )
                 total_loss = losses["total"] / grad_accum_steps
 

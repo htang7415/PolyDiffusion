@@ -15,6 +15,7 @@ from pathlib import Path
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
+from ..chem.ap_smiles import SHIELD1, SHIELD2
 from ..chem.vocab import AnchorSafeVocab
 from ..losses.objectives import stage_c_objective
 from ..utils.logging import configure_logging
@@ -169,6 +170,10 @@ def run_stage_c(config_path: str) -> None:
 
         timesteps = model.diffusion.sample_timesteps(tokens.size(0))
         noisy_tokens, noise_mask = model.diffusion.q_sample(tokens, timesteps)
+        anchor_mask_tokens = (tokens == vocab.token_to_id[SHIELD1]) | (tokens == vocab.token_to_id[SHIELD2])
+        if torch.any(anchor_mask_tokens):
+            noise_mask = noise_mask | anchor_mask_tokens
+            noisy_tokens = noisy_tokens.masked_fill(anchor_mask_tokens, vocab.mask_id)
         outputs = model(noisy_tokens, timesteps, attention_mask=mask, properties=properties, s_target=synth)
         losses = stage_c_objective(
             model,
@@ -183,6 +188,7 @@ def run_stage_c(config_path: str) -> None:
             lambda_syn,
             lambda_prop,
             lambda_gram,
+            vocab,
             target_property=target_property,  # Pass target_property to loss function
         )
 

@@ -22,6 +22,8 @@ class SamplerConfig:
     temperature: float = 1.0
     early_stop: bool = True
     min_tokens: int = 2
+    target_length_min: Optional[int] = None
+    target_length_max: Optional[int] = None
 
 
 def _sample_from_logits(logits: torch.Tensor, temperature: float) -> torch.Tensor:
@@ -69,6 +71,7 @@ def _apply_early_stopping(
     pad_id: int,
     prefix_length: int,
     min_tokens: int,
+    required_token_ids: Optional[Sequence[int]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Freeze sequences once the first EOS token appears by padding the tail.
@@ -79,12 +82,19 @@ def _apply_early_stopping(
         finished_rows: Boolean vector indicating which rows already terminated.
         eos_id: Vocabulary id for EOS.
         pad_id: Vocabulary id for PAD.
+        required_token_ids: Optional set of token ids that must appear before termination.
 
     Returns:
         Updated (tokens, frozen_mask, finished_rows).
     """
     if tokens.numel() == 0:
         return tokens, frozen_mask, finished_rows
+
+    required_set = (
+        {int(token_id) for token_id in required_token_ids if token_id is not None and token_id >= 0}
+        if required_token_ids
+        else set()
+    )
 
     batch, seq_len = tokens.shape
     device = tokens.device
@@ -107,6 +117,11 @@ def _apply_early_stopping(
         content_tokens = max(0, eos_position - prefix_length)
         if content_tokens < min_tokens:
             continue
+        if required_set:
+            row_tokens = tokens[row, : eos_position + 1].tolist()
+            row_token_set = {int(token) for token in row_tokens}
+            if not required_set.issubset(row_token_set):
+                continue
         if eos_position + 1 < seq_len:
             tokens[row, eos_position + 1 :] = pad_id
         frozen_mask[row, eos_position:] = True
@@ -169,9 +184,26 @@ class GuidedSampler:
         eos_id = self.vocab.eos_id
         pad_id = self.vocab.pad_id
         shield1_id = self.vocab.token_to_id[SHIELD1]
+        shield2_id = self.vocab.token_to_id[SHIELD2]
 
         tokens[:, 0] = bos_id
         tokens[:, 1] = shield1_id
+
+        min_content = max(self.config.min_tokens, 1)
+        if self.config.target_length_min is not None:
+            min_content = max(min_content, int(self.config.target_length_min))
+        max_content = max(1, seq_len - 2)
+        if self.config.target_length_max is not None:
+            max_content = min(max_content, int(self.config.target_length_max))
+        if max_content <= min_content:
+            length_targets = torch.full((num_samples,), min_content, device=self.device, dtype=torch.long)
+        else:
+            length_targets = torch.randint(
+                low=min_content,
+                high=max_content + 1,
+                size=(num_samples,),
+                device=self.device,
+            )
 
         anchor_mask = torch.zeros_like(tokens, dtype=torch.bool)
         anchor_mask[:, 0] = True
@@ -229,11 +261,32 @@ class GuidedSampler:
                 self.vocab.token_to_id.get("<UNK>"),
             ]
             logits = _mask_logits(logits, forbidden_ids)
+
+            if eos_id is not None:
+                has_anchor2 = torch.any(tokens == shield2_id, dim=1)
+                if not torch.all(has_anchor2):
+                    logits = logits.clone()
+                    missing_rows = (~has_anchor2).nonzero(as_tuple=True)[0]
+                    if missing_rows.numel() > 0:
+                        logits[missing_rows, :, eos_id] = float("-inf")
+                content_lengths = torch.clamp((tokens != pad_id).sum(dim=1) - 2, min=0)
+                eos_ready = has_anchor2 & (content_lengths >= length_targets)
+                if torch.any(eos_ready):
+                    logits = logits.clone()
+                    boosts = torch.zeros(num_samples, device=self.device, dtype=logits.dtype)
+                    diff = content_lengths.float() - length_targets.float()
+                    boosts[eos_ready] = torch.clamp(diff[eos_ready] * 0.5, min=0.0, max=6.0)
+                    logits[:, :, eos_id] = logits[:, :, eos_id] + boosts.unsqueeze(-1)
+
             sampled = _sample_from_logits(logits, self.config.temperature)
             update_mask = ~(anchor_mask | frozen_mask)
             tokens = torch.where(update_mask, sampled, tokens).detach()
             tokens[:, 0] = bos_id
             tokens[:, 1] = shield1_id
+            anchor2_positions = tokens == shield2_id
+            new_anchor2 = anchor2_positions & ~frozen_mask
+            if torch.any(new_anchor2):
+                frozen_mask = frozen_mask | new_anchor2
             if self.config.early_stop:
                 tokens, frozen_mask, finished_rows = _apply_early_stopping(
                     tokens,
@@ -243,6 +296,7 @@ class GuidedSampler:
                     pad_id,
                     prefix_length=2,
                     min_tokens=self.config.min_tokens,
+                    required_token_ids=(shield2_id,),
                 )
             attention_mask = tokens != pad_id
             final_outputs = {
@@ -376,6 +430,7 @@ class PlainSampler:
                     pad_id,
                     prefix_length=1,
                     min_tokens=self.config.min_tokens,
+                    required_token_ids=None,
                 )
             attention_mask = tokens != pad_id
             final_outputs = {
