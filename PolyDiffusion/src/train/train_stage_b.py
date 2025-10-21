@@ -6,6 +6,7 @@ import argparse
 import logging
 import sys
 import time
+from itertools import cycle
 from pathlib import Path
 from typing import Callable
 
@@ -219,14 +220,12 @@ def run_stage_b(config_path: str) -> None:
         resume_path = Path(cfg["resume_checkpoint"])
         if resume_path.exists():
             start_step = load_checkpoint(resume_path, model, optimizer, scheduler)
-            log = logging.getLogger(__name__)
             log.info(f"Resumed from checkpoint {resume_path} at step {start_step}")
 
     log_interval = train_cfg.get("log_interval", 10)
     save_interval = train_cfg.get("save_interval", 500)
     lambda_syn = cfg["loss"]["lambda_syn"]
     lambda_gram = cfg["loss"].get("lambda_gram", 0.1)
-    log = logging.getLogger(__name__)
 
     # Setup Results directory
     results_dir = Path(cfg.get("results_dir", "Results/stage_b"))
@@ -266,18 +265,15 @@ def run_stage_b(config_path: str) -> None:
 
     model.train()
 
-    data_iter = iter(dataloader)
+    # Use cycle to avoid expensive DataLoader recreation on exhaustion
+    data_iter = cycle(dataloader)
     last_logged_losses: dict[str, float] | None = None
     for step in range(start_step, steps):
         optimizer.zero_grad(set_to_none=True)
         step_loss_sums: dict[str, float] = {}
 
         for micro_step in range(grad_accum_steps):
-            try:
-                batch = next(data_iter)
-            except StopIteration:
-                data_iter = iter(dataloader)
-                batch = next(data_iter)
+            batch = next(data_iter)
 
             tokens = batch["tokens"].to(device)
             mask = batch["mask"].to(device)

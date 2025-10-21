@@ -18,6 +18,27 @@ class DiffusionConfig:
     min_noise: float = 0.01
     max_noise: float = 0.5
 
+    def __post_init__(self) -> None:
+        """Validate configuration parameters."""
+        if self.vocab_size <= 0:
+            raise ValueError(f"vocab_size must be positive, got {self.vocab_size}")
+        if self.num_steps <= 0:
+            raise ValueError(f"num_steps must be positive, got {self.num_steps}")
+        if self.mask_token_id < 0 or self.mask_token_id >= self.vocab_size:
+            raise ValueError(
+                f"mask_token_id ({self.mask_token_id}) must be in range [0, {self.vocab_size})"
+            )
+        if self.min_noise < 0.0 or self.min_noise > 1.0:
+            raise ValueError(f"min_noise must be in [0, 1], got {self.min_noise}")
+        if self.max_noise < 0.0 or self.max_noise > 1.0:
+            raise ValueError(f"max_noise must be in [0, 1], got {self.max_noise}")
+        if self.min_noise >= self.max_noise:
+            raise ValueError(
+                f"min_noise ({self.min_noise}) must be < max_noise ({self.max_noise})"
+            )
+        if self.schedule not in ("linear", "cosine"):
+            raise ValueError(f"schedule must be 'linear' or 'cosine', got '{self.schedule}'")
+
 
 class CategoricalDiffusion(nn.Module):
     """Simple discrete diffusion process implemented as token corruption."""

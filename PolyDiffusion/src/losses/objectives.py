@@ -42,7 +42,7 @@ def property_loss(
         if target_property in property_preds and target_property in targets:
             return nn.functional.mse_loss(property_preds[target_property], targets[target_property])
         else:
-            device = next(iter(property_preds.values())).device if property_preds else "cpu"
+            device = next(iter(property_preds.values())).device if property_preds else torch.device("cpu")
             return torch.tensor(0.0, device=device)
 
     # Multi-property mode (for reference or multi-task learning)
@@ -52,7 +52,7 @@ def property_loss(
         losses.append(nn.functional.mse_loss(pred, targets[name]))
 
     if not losses:
-        device = next(iter(property_preds.values())).device if property_preds else "cpu"
+        device = next(iter(property_preds.values())).device if property_preds else torch.device("cpu")
         return torch.tensor(0.0, device=device)
 
     return torch.stack(losses).mean()

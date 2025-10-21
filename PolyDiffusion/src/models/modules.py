@@ -9,6 +9,9 @@ from typing import Optional
 import torch
 from torch import nn
 
+# Standard RoPE (Rotary Position Embedding) base frequency
+ROTARY_EMBEDDING_BASE = 10000
+
 
 class AdaLayerNorm(nn.Module):
     """LayerNorm reparameterised by a conditioning embedding."""
@@ -50,7 +53,7 @@ class RotaryEmbedding(nn.Module):
         self.dim = dim
 
     def forward(self, seq_len: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, self.dim, device=device, dtype=torch.float32) / self.dim))
+        inv_freq = 1.0 / (ROTARY_EMBEDDING_BASE ** (torch.arange(0, self.dim, device=device, dtype=torch.float32) / self.dim))
         positions = torch.arange(seq_len, device=device, dtype=torch.float32)
         freqs = torch.outer(positions, inv_freq)
         sin = freqs.sin()[None, None, :, :]
@@ -97,7 +100,6 @@ class TransformerBlock(nn.Module):
         dropout: float,
         cond_dim: int,
         use_rotary: bool = True,
-        use_alibi: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -114,7 +116,6 @@ class TransformerBlock(nn.Module):
         self.ff = FeedForward(hidden_size, dropout=dropout)
         self.dropout = nn.Dropout(dropout)
         self.use_rotary = use_rotary
-        self.use_alibi = use_alibi
         self.rotary = RotaryEmbedding(self.head_dim // 2) if use_rotary else None
 
     def forward(

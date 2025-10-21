@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Iterable, List, Sequence
 
 from ..chem.ap_smiles import SHIELD1, SHIELD2, unshield_anchors
 from ..chem.vocab import AnchorSafeVocab
+
+log = logging.getLogger(__name__)
 
 
 def _build_shielded_tokens(vocab: AnchorSafeVocab, sequence: Sequence[int]) -> List[str]:
@@ -72,11 +75,13 @@ def _fallback_decode(vocab: AnchorSafeVocab, sequence: Sequence[int]) -> str:
     except ValueError:
         core = "".join(tok for tok in sanitized_tokens if tok not in (SHIELD1, SHIELD2))
         if not core:
+            log.warning(f"Empty core tokens during fallback decode for sequence: {sequence[:20]}...")
             return ""
         fallback_shielded = f"{SHIELD1}{core}{SHIELD2}"
         try:
             return unshield_anchors(fallback_shielded)
         except ValueError:
+            log.warning(f"Failed to decode sequence even with fallback: {sequence[:20]}...")
             return ""
 
 

@@ -10,6 +10,7 @@ import argparse
 import logging
 import sys
 import time
+from itertools import cycle
 from pathlib import Path
 
 import torch
@@ -124,7 +125,6 @@ def run_stage_c(config_path: str) -> None:
         resume_path = Path(cfg["resume_checkpoint"])
         if resume_path.exists():
             start_step = load_checkpoint(resume_path, model, optimizer, scheduler)
-            log = logging.getLogger(__name__)
             log.info(f"Resumed from checkpoint {resume_path} at step {start_step}")
 
     log_interval = train_cfg.get("log_interval", 10)
@@ -132,7 +132,6 @@ def run_stage_c(config_path: str) -> None:
     lambda_syn = cfg["loss"]["lambda_syn"]
     lambda_prop = cfg["loss"]["lambda_prop"]
     lambda_gram = cfg["loss"]["lambda_gram"]
-    log = logging.getLogger(__name__)
 
     # Setup Results directory with property name
     if target_property:
@@ -151,13 +150,10 @@ def run_stage_c(config_path: str) -> None:
 
     model.train()
 
-    data_iter = iter(dataloader)
+    # Use cycle to avoid expensive DataLoader recreation on exhaustion
+    data_iter = cycle(dataloader)
     for step in range(start_step, steps):
-        try:
-            batch = next(data_iter)
-        except StopIteration:
-            data_iter = iter(dataloader)
-            batch = next(data_iter)
+        batch = next(data_iter)
 
         tokens = batch["tokens"].to(device)
         mask = batch["mask"].to(device)

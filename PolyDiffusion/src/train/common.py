@@ -175,7 +175,17 @@ def load_yaml(path: Path) -> dict:
         return yaml.safe_load(handle)
 
 
-def build_model(vocab: AnchorSafeVocab | PlainVocab, model_cfg: dict) -> DiffusionTransformer:
+def build_model(vocab: AnchorSafeVocab | PlainVocab, model_cfg: dict, max_seq_len: int = 2048) -> DiffusionTransformer:
+    """Build DiffusionTransformer model from configuration.
+
+    Args:
+        vocab: Vocabulary (PlainVocab for Stage A, AnchorSafeVocab for Stage B/C).
+        model_cfg: Model configuration dictionary from YAML.
+        max_seq_len: Maximum sequence length for positional embeddings (default: 2048).
+
+    Returns:
+        DiffusionTransformer model instance.
+    """
     model_config = ModelConfig(
         vocab_size=len(vocab),
         hidden_size=model_cfg["d_model"],
@@ -196,7 +206,7 @@ def build_model(vocab: AnchorSafeVocab | PlainVocab, model_cfg: dict) -> Diffusi
         min_noise=model_cfg.get("min_noise", 0.01),
         max_noise=model_cfg.get("max_noise", 0.5),
     )
-    return DiffusionTransformer(model_config, diffusion_config)
+    return DiffusionTransformer(model_config, diffusion_config, max_seq_len=max_seq_len)
 
 
 def build_stage_dataset(

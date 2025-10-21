@@ -69,11 +69,14 @@ class DiffusionTransformer(nn.Module):
         self,
         model_config: ModelConfig,
         diffusion_config: DiffusionConfig,
+        max_seq_len: int = 2048,
     ) -> None:
         super().__init__()
         self.config = model_config
+        self.max_seq_len = max_seq_len
         self.token_embed = nn.Embedding(model_config.vocab_size, model_config.hidden_size)
-        self.pos_embed = nn.Parameter(torch.randn(1, 1024, model_config.hidden_size) * 0.01)
+        # Preallocate positional embeddings for maximum sequence length to avoid dynamic expansion
+        self.pos_embed = nn.Parameter(torch.randn(1, max_seq_len, model_config.hidden_size) * 0.01)
         self.time_embed = nn.Embedding(diffusion_config.num_steps + 1, model_config.hidden_size)
         self.dropout = nn.Dropout(model_config.dropout)
         self.condition_net = ConditionNet(model_config.property_names, model_config.hidden_size)
@@ -102,12 +105,15 @@ class DiffusionTransformer(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         batch, seq_len = tokens.shape
         device = tokens.device
+
+        # Validate sequence length
+        if seq_len > self.max_seq_len:
+            raise ValueError(
+                f"Sequence length {seq_len} exceeds maximum allowed length {self.max_seq_len}. "
+                f"Consider increasing max_seq_len in model initialization."
+            )
+
         timed = self.time_embed(timesteps).unsqueeze(1)
-        if self.pos_embed.size(1) < seq_len:
-            extra = seq_len - self.pos_embed.size(1)
-            device_pe = self.pos_embed.device
-            extra_embed = torch.randn(1, extra, self.pos_embed.size(-1), device=device_pe) * 0.01
-            self.pos_embed = nn.Parameter(torch.cat([self.pos_embed, extra_embed], dim=1))
         x = self.token_embed(tokens) + timed + self.pos_embed[:, :seq_len, :]
         x = self.dropout(x)
 

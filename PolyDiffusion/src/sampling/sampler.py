@@ -264,19 +264,24 @@ class GuidedSampler:
 
             if eos_id is not None:
                 has_anchor2 = torch.any(tokens == shield2_id, dim=1)
-                if not torch.all(has_anchor2):
-                    logits = logits.clone()
-                    missing_rows = (~has_anchor2).nonzero(as_tuple=True)[0]
-                    if missing_rows.numel() > 0:
-                        logits[missing_rows, :, eos_id] = float("-inf")
                 content_lengths = torch.clamp((tokens != pad_id).sum(dim=1) - 2, min=0)
                 eos_ready = has_anchor2 & (content_lengths >= length_targets)
-                if torch.any(eos_ready):
+
+                # Single clone if any modifications needed
+                needs_modification = not torch.all(has_anchor2) or torch.any(eos_ready)
+                if needs_modification:
                     logits = logits.clone()
-                    boosts = torch.zeros(num_samples, device=self.device, dtype=logits.dtype)
-                    diff = content_lengths.float() - length_targets.float()
-                    boosts[eos_ready] = torch.clamp(diff[eos_ready] * 0.5, min=0.0, max=6.0)
-                    logits[:, :, eos_id] = logits[:, :, eos_id] + boosts.unsqueeze(-1)
+
+                    if not torch.all(has_anchor2):
+                        missing_rows = (~has_anchor2).nonzero(as_tuple=True)[0]
+                        if missing_rows.numel() > 0:
+                            logits[missing_rows, :, eos_id] = float("-inf")
+
+                    if torch.any(eos_ready):
+                        boosts = torch.zeros(num_samples, device=self.device, dtype=logits.dtype)
+                        diff = content_lengths.float() - length_targets.float()
+                        boosts[eos_ready] = torch.clamp(diff[eos_ready] * 0.5, min=0.0, max=6.0)
+                        logits[:, :, eos_id] = logits[:, :, eos_id] + boosts.unsqueeze(-1)
 
             sampled = _sample_from_logits(logits, self.config.temperature)
             update_mask = ~(anchor_mask | frozen_mask)

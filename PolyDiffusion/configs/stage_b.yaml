@@ -29,9 +29,9 @@ training:
   lr: 2.0e-4
   lr_min: 1.0e-6
   weight_decay: 0.01
-  steps: 50000
+  steps: 1000
   log_interval: 1000
-  save_interval: 10000  # Save checkpoint every 250 steps
+  save_interval: 1000  # Save checkpoint every 250 steps
   max_grad_norm: 1.0
   num_workers: 32
   pin_memory: true
