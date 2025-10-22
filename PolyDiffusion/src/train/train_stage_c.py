@@ -129,7 +129,6 @@ def run_stage_c(config_path: str) -> None:
 
     log_interval = train_cfg.get("log_interval", 10)
     save_interval = train_cfg.get("save_interval", 200)
-    lambda_syn = cfg["loss"]["lambda_syn"]
     lambda_prop = cfg["loss"]["lambda_prop"]
     lambda_gram = cfg["loss"]["lambda_gram"]
 
@@ -157,7 +156,6 @@ def run_stage_c(config_path: str) -> None:
 
         tokens = batch["tokens"].to(device)
         mask = batch["mask"].to(device)
-        synth = batch["synth"].to(device)
         anchor_count = batch["anchor_count"].to(device)
         valence = batch["valence"].to(device)
 
@@ -170,18 +168,16 @@ def run_stage_c(config_path: str) -> None:
         if torch.any(anchor_mask_tokens):
             noise_mask = noise_mask | anchor_mask_tokens
             noisy_tokens = noisy_tokens.masked_fill(anchor_mask_tokens, vocab.mask_id)
-        outputs = model(noisy_tokens, timesteps, attention_mask=mask, properties=properties, s_target=synth)
+        outputs = model(noisy_tokens, timesteps, attention_mask=mask, properties=properties)
         losses = stage_c_objective(
             model,
             outputs,
             tokens,
             timesteps,
             noise_mask,
-            synth,
             properties,
             anchor_count,
             valence,
-            lambda_syn,
             lambda_prop,
             lambda_gram,
             vocab,
@@ -197,11 +193,10 @@ def run_stage_c(config_path: str) -> None:
         if step % log_interval == 0:
             current_lr = optimizer.param_groups[0]['lr']
             log.info(
-                "step=%d loss_total=%.4f loss_diff=%.4f loss_syn=%.4f loss_prop=%.4f loss_gram=%.4f lr=%.2e",
+                "step=%d loss_total=%.4f loss_diff=%.4f loss_prop=%.4f loss_gram=%.4f lr=%.2e",
                 step,
                 float(losses["total"]),
                 float(losses["diffusion"]),
-                float(losses["synth"]),
                 float(losses["properties"]),
                 float(losses["grammar"]),
                 current_lr,

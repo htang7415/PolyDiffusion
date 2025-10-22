@@ -27,10 +27,10 @@ training:
   micro_batch_size: 256     # per-device batch size to control GPU memory
   grad_accum_steps: 4      # accumulate gradients to reach effective batch size
   lr: 2.0e-4
-  lr_min: 1.0e-6
+  lr_min: 1.0e-5
   weight_decay: 0.01
   steps: 10000
-  log_interval: 500
+  log_interval: 1000
   save_interval: 2000  # Save checkpoint every 250 steps
   max_grad_norm: 1.0
   num_workers: 32
@@ -38,7 +38,6 @@ training:
   use_amp: true
 
 loss:
-  lambda_syn: 0.0  # disable synthesis regression when SA Score is unused
   lambda_gram: 0.1
 
 # Optional: Resume from checkpoint if training interrupted

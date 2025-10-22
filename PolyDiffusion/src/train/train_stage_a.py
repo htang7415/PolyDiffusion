@@ -127,6 +127,8 @@ def run_stage_a(config_path: str) -> None:
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=train_cfg["lr"],
+        betas=(0.9, 0.95),
+        eps=1e-8,
         weight_decay=train_cfg.get("weight_decay", 0.01),
     )
 
@@ -144,7 +146,6 @@ def run_stage_a(config_path: str) -> None:
 
     log_interval = train_cfg.get("log_interval", 10)
     save_interval = train_cfg.get("save_interval", 500)
-    lambda_syn = cfg["loss"]["lambda_syn"]
 
     # Setup Results directory
     results_dir = Path(cfg.get("results_dir", "Results/stage_a"))
@@ -189,14 +190,13 @@ def run_stage_a(config_path: str) -> None:
 
             tokens = batch["tokens"].to(device)
             mask = batch["mask"].to(device)
-            synth = batch["synth"].to(device)
 
             timesteps = model.diffusion.sample_timesteps(tokens.size(0))
             noisy_tokens, noise_mask = model.diffusion.q_sample(tokens, timesteps)
 
             with _autocast(use_amp, torch.float16):
-                outputs = model(noisy_tokens, timesteps, attention_mask=mask, s_target=synth)
-                losses = stage_a_objective(model, outputs, tokens, timesteps, noise_mask, synth, lambda_syn)
+                outputs = model(noisy_tokens, timesteps, attention_mask=mask)
+                losses = stage_a_objective(model, outputs, tokens, timesteps, noise_mask)
                 total_loss = losses["total"] / grad_accum_steps
 
             if use_amp:

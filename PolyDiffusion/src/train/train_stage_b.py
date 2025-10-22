@@ -208,6 +208,8 @@ def run_stage_b(config_path: str) -> None:
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=train_cfg["lr"],
+        betas=(0.9, 0.95),
+        eps=1e-8,
         weight_decay=train_cfg.get("weight_decay", 0.01),
     )
 
@@ -224,7 +226,6 @@ def run_stage_b(config_path: str) -> None:
 
     log_interval = train_cfg.get("log_interval", 10)
     save_interval = train_cfg.get("save_interval", 500)
-    lambda_syn = cfg["loss"]["lambda_syn"]
     lambda_gram = cfg["loss"].get("lambda_gram", 0.1)
 
     # Setup Results directory
@@ -277,7 +278,6 @@ def run_stage_b(config_path: str) -> None:
 
             tokens = batch["tokens"].to(device)
             mask = batch["mask"].to(device)
-            synth = batch["synth"].to(device)
             anchor_count = batch["anchor_count"].to(device)
             valence = batch["valence"].to(device)
 
@@ -289,17 +289,15 @@ def run_stage_b(config_path: str) -> None:
                 noisy_tokens = noisy_tokens.masked_fill(anchor_mask_tokens, vocab.mask_id)
 
             with _autocast(use_amp, torch.float16):
-                outputs = model(noisy_tokens, timesteps, attention_mask=mask, s_target=synth)
+                outputs = model(noisy_tokens, timesteps, attention_mask=mask)
                 losses = stage_b_objective(
                     model,
                     outputs,
                     tokens,
                     timesteps,
                     noise_mask,
-                    synth,
                     anchor_count,
                     valence,
-                    lambda_syn,
                     lambda_gram,
                     vocab,
                 )

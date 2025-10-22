@@ -107,14 +107,15 @@ def stage_a_objective(
     x0: torch.Tensor,
     timesteps: torch.Tensor,
     mask: torch.Tensor,
-    synth_target: torch.Tensor,
-    lambda_syn: float,
 ) -> Dict[str, torch.Tensor]:
+    """Stage A objective: pure diffusion loss (no synthesizability).
+
+    Dataset only contains SMILES, not SA scores, so we only optimize
+    the discrete diffusion objective.
+    """
     losses: Dict[str, torch.Tensor] = {}
     losses["diffusion"] = diffusion_ce(model, outputs, x0, timesteps, mask)
-    losses["synth"] = synthesis_loss(outputs["synth_pred"], synth_target)
-    total = losses["diffusion"] + lambda_syn * losses["synth"]
-    losses["total"] = total
+    losses["total"] = losses["diffusion"]
     return losses
 
 
@@ -124,14 +125,18 @@ def stage_b_objective(
     x0: torch.Tensor,
     timesteps: torch.Tensor,
     mask: torch.Tensor,
-    synth_target: torch.Tensor,
     anchor_count: torch.Tensor,
     valence_flag: torch.Tensor,
-    lambda_syn: float,
     lambda_gram: float,
     vocab,
 ) -> Dict[str, torch.Tensor]:
-    losses = stage_a_objective(model, outputs, x0, timesteps, mask, synth_target, lambda_syn)
+    """Stage B objective: diffusion + grammar loss (no synthesizability).
+
+    Dataset only contains SMILES, not SA scores, so we only optimize:
+    - Discrete diffusion (token reconstruction)
+    - Grammar constraints (anchor preservation for polymers)
+    """
+    losses = stage_a_objective(model, outputs, x0, timesteps, mask)
     gram = grammar_penalty(outputs, x0, anchor_count, valence_flag, vocab)
     losses["grammar"] = gram
     losses["total"] = losses["total"] + lambda_gram * gram
@@ -144,11 +149,9 @@ def stage_c_objective(
     x0: torch.Tensor,
     timesteps: torch.Tensor,
     mask: torch.Tensor,
-    synth_target: torch.Tensor,
     property_targets: Dict[str, torch.Tensor],
     anchor_count: torch.Tensor,
     valence_flag: torch.Tensor,
-    lambda_syn: float,
     lambda_prop: float,
     lambda_gram: float,
     vocab,
@@ -156,12 +159,17 @@ def stage_c_objective(
 ) -> Dict[str, torch.Tensor]:
     """Stage C objective for property-guided generation.
 
+    Optimizes:
+    - Discrete diffusion (token reconstruction)
+    - Property prediction (Tg, Tm, Td, Eg, chi)
+    - Grammar constraints (anchor preservation)
+
     Args:
         target_property: If specified, trains only on this property (recommended).
             Train separate models for Tg, Tm, Td, Eg, chi.
             If None, trains on all properties simultaneously (multi-task).
     """
-    losses = stage_a_objective(model, outputs, x0, timesteps, mask, synth_target, lambda_syn)
+    losses = stage_a_objective(model, outputs, x0, timesteps, mask)
     prop = property_loss(outputs["property_preds"], property_targets, target_property)
     losses["properties"] = prop
     losses["total"] = losses["total"] + lambda_prop * prop
