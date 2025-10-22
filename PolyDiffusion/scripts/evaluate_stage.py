@@ -127,10 +127,11 @@ def attach_sa_scores(
             pred["synth_source"] = "rdkit_sa"
             pred["sa_score_rdkit"] = float(score)
         else:
-            pred.setdefault("synth_source", "model_prediction" if synth_pred is not None else "unavailable")
+            # For invalid SMILES, don't use model prediction as fallback
+            # Metrics should only use valid RDKit SA scores
+            pred["synth_source"] = "invalid_smiles"
             pred["sa_score_rdkit"] = None
-            if pred.get("synth") is None and pred.get("synth_model") is not None:
-                pred["synth"] = pred["synth_model"]
+            pred["synth"] = None  # Don't fallback to model prediction
     return scores
 
 
@@ -182,36 +183,39 @@ def compute_stage_a_metrics(
         metrics["validity_rdkit"] = None
 
     # 2. Synthesizability (mean synthesis score)
+    # Only use RDKit SA scores, not model predictions
     synth_scores: List[float] = []
-    synth_sources: Set[str] = set()
-    sa_invalid = 0
+    rdkit_count = 0
+    invalid_count = 0
+
     for pred in predictions:
         if pred is None:
             continue
-        synth = pred.get("synth")
-        if synth is None:
-            continue
-        synth_scores.append(float(synth))
-        source = pred.get("synth_source")
-        if source:
-            synth_sources.add(str(source))
-        if source == "rdkit_sa" and pred.get("sa_score_rdkit") is None:
-            sa_invalid += 1
+        # Only accept RDKit-calculated SA scores
+        if pred.get("synth_source") == "rdkit_sa":
+            synth = pred.get("synth")
+            if synth is not None and synth >= 0:
+                synth_scores.append(float(synth))
+                rdkit_count += 1
+        elif pred.get("synth_source") == "invalid_smiles":
+            invalid_count += 1
+
     if synth_scores:
         metrics["synthesizability_mean"] = float(np.mean(synth_scores))
         metrics["synthesizability_std"] = float(np.std(synth_scores))
-        if "rdkit_sa" in synth_sources:
-            metrics["synth_source"] = "rdkit_sa"
-            metrics["sa_invalid_count"] = sa_invalid
-        else:
-            metrics["synth_source"] = "model_prediction"
-            metrics["sa_invalid_count"] = 0
+        metrics["synth_source"] = "rdkit_sa"
     else:
+        # Fallback: compute directly if no valid predictions
         sa_mean, sa_std, invalid = compute_sa_statistics(samples, stage)
         metrics["synthesizability_mean"] = sa_mean
         metrics["synthesizability_std"] = sa_std
-        metrics["synth_source"] = "rdkit_sa_score" if sa_mean is not None else "unavailable"
-        metrics["sa_invalid_count"] = invalid
+        metrics["synth_source"] = "rdkit_sa_fallback" if sa_mean is not None else "unavailable"
+        invalid_count = invalid
+
+    # Add validity statistics
+    metrics["sa_valid_count"] = rdkit_count
+    metrics["sa_invalid_count"] = invalid_count
+    metrics["sa_valid_fraction"] = rdkit_count / total if total > 0 else 0.0
 
     # 3. Uniqueness
     unique_samples = set(samples)
@@ -326,12 +330,36 @@ def compute_stage_c_metrics(
             metrics[f"{target_property}_min"] = np.min(values)
             metrics[f"{target_property}_max"] = np.max(values)
 
-    # Synthesizability
-    synth_scores = [p.get("synth") for p in predictions if p.get("synth") is not None]
+    # Synthesizability - only use RDKit SA scores, ignore invalid SMILES
+    synth_scores: List[float] = []
+    rdkit_count = 0
+    invalid_count = 0
+
+    for pred in predictions:
+        if pred is None:
+            continue
+        # Only accept RDKit-calculated SA scores
+        if pred.get("synth_source") == "rdkit_sa":
+            synth = pred.get("synth")
+            if synth is not None and synth >= 0:
+                synth_scores.append(float(synth))
+                rdkit_count += 1
+        elif pred.get("synth_source") == "invalid_smiles":
+            invalid_count += 1
+
     if synth_scores:
         metrics["synthesizability_mean"] = float(np.mean(synth_scores))
         metrics["synthesizability_std"] = float(np.std(synth_scores))
-        metrics["synth_source"] = "model_prediction"
+        metrics["synth_source"] = "rdkit_sa"
+    else:
+        metrics["synthesizability_mean"] = None
+        metrics["synthesizability_std"] = None
+        metrics["synth_source"] = "unavailable"
+
+    # Add validity statistics
+    metrics["sa_valid_count"] = rdkit_count
+    metrics["sa_invalid_count"] = invalid_count
+    metrics["sa_valid_fraction"] = rdkit_count / total if total > 0 else 0.0
 
     return metrics
 
@@ -518,9 +546,18 @@ def print_evaluation_summary(stage: str, metrics: Dict, target_property: Optiona
         if stage == "b":
             print(f"Anchor Correctness: {metrics.get('anchor_correctness', 0):.2%}")
 
+        # Show SA validity statistics
+        sa_valid_fraction = metrics.get("sa_valid_fraction", 0)
+        sa_valid_count = metrics.get("sa_valid_count", 0)
+        sa_invalid_count = metrics.get("sa_invalid_count", 0)
+        print(f"SA Valid Fraction: {sa_valid_fraction:.2%} ({sa_valid_count} valid, {sa_invalid_count} invalid)")
+
         synth_mean = metrics.get("synthesizability_mean")
         synth_std = metrics.get("synthesizability_std")
-        print(f"Synthesizability: {format_stat(synth_mean)} ± {format_stat(synth_std)}")
+        if synth_mean is not None:
+            print(f"Synthesizability: {format_stat(synth_mean)} ± {format_stat(synth_std)} (RDKit SA score for valid SMILES only)")
+        else:
+            print(f"Synthesizability: N/A (no valid SMILES generated)")
         print(f"Uniqueness: {metrics.get('uniqueness', 0):.2%} ({metrics.get('unique_count', 0)})")
 
         if metrics.get("novelty") is not None:
