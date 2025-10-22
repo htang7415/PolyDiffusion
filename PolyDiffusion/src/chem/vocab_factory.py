@@ -119,7 +119,8 @@ def load_vocabulary_auto(
         log.info(f"Detected tokenization method from file: {method}")
 
         # Determine if anchors present
-        tokens_content = [line for line in lines if not line.startswith('#')]
+        # Note: Use '# ' to skip only metadata lines, preserving '#' as a valid token
+        tokens_content = [line for line in lines if not line.startswith('# ')]
         has_anchors = '[Zz]' in tokens_content and '[Zr]' in tokens_content
 
         # Map method name to class

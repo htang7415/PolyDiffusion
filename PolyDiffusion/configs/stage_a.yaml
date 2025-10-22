@@ -35,9 +35,9 @@ data:
   seed: 42
 
 training:
-  batch_size: 512          # effective batch size (micro_batch_size * grad_accum_steps)
-  micro_batch_size: 512     # actual per-GPU batch size to fit memory
-  grad_accum_steps: 1        # accumulate gradients to reach effective batch size
+  batch_size: 256          # effective batch size (micro_batch_size * grad_accum_steps)
+  micro_batch_size: 64     # actual per-GPU batch size to fit memory
+  grad_accum_steps: 4        # accumulate gradients to reach effective batch size
   lr: 3.0e-4
   lr_min: 1.0e-5  # Minimum LR for cosine annealing scheduler
   weight_decay: 0.02

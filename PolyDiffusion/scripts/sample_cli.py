@@ -14,8 +14,8 @@ from typing import Dict, List, Optional
 import torch
 
 from PolyDiffusion.chem.ap_smiles import SHIELD1, SHIELD2, convert_polymer_to_ap_smiles
-from PolyDiffusion.chem.plain_vocab import PlainVocab
-from PolyDiffusion.chem.vocab import AnchorSafeVocab
+from PolyDiffusion.chem.base_vocab import BaseVocabulary
+from PolyDiffusion.chem.vocab_factory import load_vocabulary_auto
 from PolyDiffusion.sampling.sampler import GuidedSampler, PlainSampler, SamplerConfig
 from PolyDiffusion.utils.sa_score import RDKIT_AVAILABLE, calculate_sa_score_batch
 from PolyDiffusion.train.common import build_model, load_yaml
@@ -247,6 +247,27 @@ def _resolve_vocab_path(stage: str, ckpt_path: Path, vocab_arg: Optional[str]) -
     )
 
 
+def _load_stage_vocab(stage: str, vocab_path: Path) -> BaseVocabulary:
+    try:
+        vocab = load_vocabulary_auto(vocab_path)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise RuntimeError(f"Failed to load vocabulary from {vocab_path}") from exc
+
+    stage_lower = stage.lower()
+    has_anchors = vocab.has_anchors()
+    if stage_lower == "a" and has_anchors:
+        raise ValueError(
+            "Loaded vocabulary contains anchor tokens but stage A sampling expects plain SMILES tokens. "
+            "Double-check the --stage flag or provide the correct vocabulary file."
+        )
+    if stage_lower in {"b", "c"} and not has_anchors:
+        raise ValueError(
+            "Loaded vocabulary is missing the [Zz]/[Zr] anchor tokens required for stage B/C sampling. "
+            "Provide a polymer vocabulary generated for those stages."
+        )
+    return vocab
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sample molecules/polymers from trained PolyDiffusion checkpoints.")
     parser.add_argument("--ckpt", required=True, type=str, help="Checkpoint path.")
@@ -293,10 +314,7 @@ def main() -> None:
     vocab_path = _resolve_vocab_path(stage, ckpt_path, args.vocab)
     model_cfg = load_yaml(Path(args.config))
 
-    if stage == "a":
-        vocab = PlainVocab.load(vocab_path)
-    else:
-        vocab = AnchorSafeVocab.load(vocab_path)
+    vocab = _load_stage_vocab(stage, vocab_path)
 
     model = build_model(vocab, model_cfg)
     ckpt = torch.load(args.ckpt, map_location="cpu")

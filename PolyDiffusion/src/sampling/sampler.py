@@ -268,22 +268,36 @@ class GuidedSampler:
             if eos_id is not None:
                 has_anchor2 = torch.any(tokens == shield2_id, dim=1)
                 content_lengths = torch.clamp((tokens != pad_id).sum(dim=1) - 2, min=0)
+
+                # Check which samples are ready for EOS (have anchor2 AND meet length target)
                 eos_ready = has_anchor2 & (content_lengths >= length_targets)
 
+                # Check which samples are too short (have anchor2 but below length target)
+                too_short = has_anchor2 & (content_lengths < length_targets)
+
                 # Single clone if any modifications needed
-                needs_modification = not torch.all(has_anchor2) or torch.any(eos_ready)
+                needs_modification = not torch.all(has_anchor2) or torch.any(eos_ready) or torch.any(too_short)
                 if needs_modification:
                     logits = logits.clone()
 
+                    # Block EOS for samples missing anchor2
                     if not torch.all(has_anchor2):
                         missing_rows = (~has_anchor2).nonzero(as_tuple=True)[0]
                         if missing_rows.numel() > 0:
                             logits[missing_rows, :, eos_id] = float("-inf")
 
+                    # Discourage EOS for samples with anchor2 but below target length
+                    if torch.any(too_short):
+                        short_rows = too_short.nonzero(as_tuple=True)[0]
+                        if short_rows.numel() > 0:
+                            logits[short_rows, :, eos_id] = float("-inf")
+
+                    # Encourage EOS when target length is reached or exceeded
                     if torch.any(eos_ready):
                         boosts = torch.zeros(num_samples, device=self.device, dtype=logits.dtype)
                         diff = content_lengths.float() - length_targets.float()
-                        boosts[eos_ready] = torch.clamp(diff[eos_ready] * 0.5, min=0.0, max=6.0)
+                        # Balanced boost for polymers: 4.0 base + 1.2 per token over target, max 14.0
+                        boosts[eos_ready] = torch.clamp(4.0 + diff[eos_ready] * 1.2, min=4.0, max=14.0)
                         logits[:, :, eos_id] = logits[:, :, eos_id] + boosts.unsqueeze(-1)
 
             sampled = _sample_from_logits(logits, self.config.temperature)
@@ -364,6 +378,24 @@ class PlainSampler:
 
         tokens[:, 0] = bos_id
 
+        # Random length targets for more diverse sample lengths
+        min_content = max(self.config.min_tokens, 1)
+        if self.config.target_length_min is not None:
+            min_content = max(min_content, int(self.config.target_length_min))
+        max_content = max(1, seq_len - 2)
+        if self.config.target_length_max is not None:
+            max_content = min(max_content, int(self.config.target_length_max))
+
+        if max_content <= min_content:
+            length_targets = torch.full((num_samples,), min_content, device=self.device, dtype=torch.long)
+        else:
+            length_targets = torch.randint(
+                low=min_content,
+                high=max_content + 1,
+                size=(num_samples,),
+                device=self.device,
+            )
+
         fixed_mask = torch.zeros_like(tokens, dtype=torch.bool)
         fixed_mask[:, 0] = True
 
@@ -404,6 +436,30 @@ class PlainSampler:
                 self.vocab.token_to_id.get("<UNK>"),
             ]
             logits = _mask_logits(logits, forbidden_ids)
+
+            # Control EOS generation based on target lengths for more diverse sample lengths
+            if eos_id is not None and (self.config.target_length_min is not None or self.config.target_length_max is not None):
+                content_lengths = torch.clamp((tokens != pad_id).sum(dim=1) - 1, min=0)  # -1 for BOS
+
+                logits = logits.clone()
+
+                # Strongly discourage EOS when length is below target
+                too_short = content_lengths < length_targets
+                if torch.any(too_short):
+                    short_rows = too_short.nonzero(as_tuple=True)[0]
+                    if short_rows.numel() > 0:
+                        logits[short_rows, :, eos_id] = float("-inf")
+
+                # Encourage EOS when target length is reached or exceeded
+                # Linear scaling with moderate strength
+                eos_ready = content_lengths >= length_targets
+                if torch.any(eos_ready):
+                    boosts = torch.zeros(num_samples, device=self.device, dtype=logits.dtype)
+                    diff = content_lengths.float() - length_targets.float()
+                    # Linear boost: 3.0 base + 1.0 per token over target, max 12.0
+                    boosts[eos_ready] = torch.clamp(3.0 + diff[eos_ready] * 1.0, min=3.0, max=12.0)
+                    logits[:, :, eos_id] = logits[:, :, eos_id] + boosts.unsqueeze(-1)
+
             sampled = _sample_from_logits(logits, self.config.temperature)
             update_mask = ~(fixed_mask | frozen_mask)
             tokens = torch.where(update_mask, sampled, tokens).detach()

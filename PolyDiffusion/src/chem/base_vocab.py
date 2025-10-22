@@ -164,7 +164,7 @@ class BaseVocabulary(ABC):
         """
         Load vocabulary from file.
 
-        Skips metadata lines (starting with #).
+        Skips metadata lines (starting with '# ').
 
         Args:
             path: Path to vocabulary file
@@ -173,6 +173,7 @@ class BaseVocabulary(ABC):
             Vocabulary instance
         """
         lines = path.read_text(encoding='utf-8').splitlines()
-        # Skip metadata lines
-        tokens = [line for line in lines if not line.startswith('#')]
+        # Skip metadata lines (which start with '# ' - note the space)
+        # This preserves '#' as a valid SMILES token for aromatic bonds
+        tokens = [line for line in lines if not line.startswith('# ')]
         return cls(tokens)

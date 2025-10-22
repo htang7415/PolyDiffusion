@@ -253,7 +253,7 @@ def run_stage_c(config_path: str) -> None:
     log_interval = train_cfg.get("log_interval", 10)
     save_interval = train_cfg.get("save_interval", 200)
     lambda_prop = cfg["loss"]["lambda_prop"]
-   lambda_gram = cfg["loss"]["lambda_gram"]
+    lambda_gram = cfg["loss"]["lambda_gram"]
 
     # Setup Results directory with property name and tokenization method
     if target_property:

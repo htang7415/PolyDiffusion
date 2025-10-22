@@ -1,6 +1,6 @@
 d_model: 768
-n_layers: 16
-n_heads: 16
+n_layers: 12
+n_heads: 12
 dropout: 0.1
 diffusion_steps: 50
 schedule: cosine
