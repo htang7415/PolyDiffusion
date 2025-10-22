@@ -1,16 +1,34 @@
-vocab_path: PolyDiffusion/vocab_stage_bc.txt
+# Tokenization configuration
+tokenization:
+  method: "character"  # Options: "character", "atom_regex", "safe"
+  vocab_path: ""  # Leave blank to auto-build from data
+
+  # Vocabulary building parameters (used when vocab_path doesn't exist)
+  build:
+    min_freq: 1
+    max_size: null
+    vocab_limit_samples: null
+
+  # SAFE-specific parameters (only used if method is "safe")
+  safe:
+    fragment_type: "brics"
+    min_fragment_size: 1
+
+# Backward compatibility: old configs without tokenization section default to character
+vocab_path: ""  # Leave blank to auto-build from data
 model_config: PolyDiffusion/configs/model_base.yaml
 
 initialization:
-  mode: scratch  # options: stage_a, scratch
-  checkpoint: Results/stage_a/best_model.pt
-  vocab_path: PolyDiffusion/vocab.txt   # Stage A vocabulary for weight remapping
+  mode: stage_a  # options: stage_a, scratch
+  checkpoint: ""  # Stage A checkpoint (auto-detected when blank)
+  vocab_path: ""   # Stage A vocabulary for weight remapping (auto-detected when blank)
   freeze_backbone: false        # true = freeze transformer backbone, train heads only
   reuse_token_embeddings: true  # copy shared tokens from Stage A embedding matrix
   reuse_output_head: true       # copy decoder logits for overlapping tokens
 
 # Results directory for checkpoints
 results_dir: Results/stage_b
+stage_a_results_dir: Results/stage_a  # Override if Stage A outputs live elsewhere
 
 data:
   path: Data/PI1M_filtered.csv
@@ -23,15 +41,15 @@ data:
   seed: 42
 
 training:
-  batch_size: 2048          # effective batch size (micro_batch_size * grad_accum_steps)
+  batch_size: 256          # effective batch size (micro_batch_size * grad_accum_steps)
   micro_batch_size: 256     # per-device batch size to control GPU memory
-  grad_accum_steps: 4      # accumulate gradients to reach effective batch size
+  grad_accum_steps: 1      # accumulate gradients to reach effective batch size
   lr: 2.0e-4
   lr_min: 1.0e-5
   weight_decay: 0.01
-  steps: 10000
+  steps: 1000
   log_interval: 1000
-  save_interval: 2000  # Save checkpoint every 250 steps
+  save_interval: 1000  # Save checkpoint every 250 steps
   max_grad_norm: 1.0
   num_workers: 32
   pin_memory: true

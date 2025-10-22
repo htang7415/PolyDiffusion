@@ -47,17 +47,6 @@ class PropertyHeads(nn.Module):
         return {name: head(pooled).squeeze(-1) for name, head in self.heads.items()}
 
 
-class SynthesisHead(nn.Module):
-    """Predict offline synthesis score."""
-
-    def __init__(self, input_dim: int) -> None:
-        super().__init__()
-        self.head = MLPHead(input_dim, 1)
-
-    def forward(self, pooled: torch.Tensor) -> torch.Tensor:
-        return self.head(pooled).squeeze(-1)
-
-
 class GrammarHead(nn.Module):
     """Auxiliary head to predict grammar feasibility."""
 

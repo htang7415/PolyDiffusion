@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -151,6 +152,74 @@ def format_stat(value: Optional[float], precision: int = 3) -> str:
     if value is None:
         return "N/A"
     return f"{value:.{precision}f}"
+
+
+def _collect_vocab_files(root: Path, recursive: bool = False) -> List[Path]:
+    """Return sorted vocabulary files located under root."""
+    root = root.expanduser()
+    if not root.exists():
+        return []
+    if root.is_file():
+        return [root] if root.name.startswith("vocab") and root.suffix == ".txt" else []
+    pattern = "**/vocab*.txt" if recursive else "vocab*.txt"
+    return sorted(path for path in root.glob(pattern) if path.is_file())
+
+
+def _resolve_vocab_path(stage: str, ckpt_path: Path, vocab_arg: Optional[str]) -> Path:
+    """Resolve the vocabulary path for evaluation if none (or an invalid one) is provided."""
+    stage = stage.lower()
+    candidates: List[Path] = []
+
+    if vocab_arg:
+        provided = Path(vocab_arg).expanduser()
+        if provided.is_dir():
+            candidates.extend(_collect_vocab_files(provided, recursive=True))
+        else:
+            candidates.append(provided)
+
+    if ckpt_path:
+        ckpt_dir = ckpt_path.parent
+        candidates.append(ckpt_dir / "vocab.txt")
+        candidates.extend(_collect_vocab_files(ckpt_dir, recursive=False))
+
+    stage_dirs = {
+        "a": [Path("Results/stage_a")],
+        "b": [Path("Results/stage_b")],
+        "c": [Path("Results/stage_c"), Path("Results/stage_b")],
+    }
+    for directory in stage_dirs.get(stage, []):
+        candidates.extend(_collect_vocab_files(directory, recursive=True))
+
+    repo_dir = Path("PolyDiffusion")
+    candidates.extend(_collect_vocab_files(repo_dir, recursive=False))
+    candidates.append(Path("PolyDiffusion/vocab_stage_bc.txt"))
+
+    ordered: List[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate = candidate.expanduser()
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            ordered.append(candidate)
+
+    for idx, candidate in enumerate(ordered):
+        if candidate.exists() and candidate.is_file():
+            if idx != 0:
+                if vocab_arg:
+                    print(
+                        f"[evaluate_stage] Provided vocabulary path was not found. Using fallback: {candidate}",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(f"[evaluate_stage] Using fallback vocabulary: {candidate}", file=sys.stderr)
+            return candidate
+
+    searched = "\n  ".join(str(path) for path in ordered) if ordered else "(no candidates discovered)"
+    raise FileNotFoundError(
+        "Unable to locate a vocabulary file for evaluation. Checked the following locations:\n"
+        f"  {searched}"
+    )
 
 
 def compute_stage_a_metrics(
@@ -401,7 +470,6 @@ def sample_and_evaluate(
     output_path: Optional[Path] = None,
     property_targets: Optional[Dict[str, tuple]] = None,
     target_property: Optional[str] = None,
-    synth_target: Optional[float] = None,
     cfg_scale: float = 1.0,
     gradient_weight: float = 0.0,
     training_data_path: Optional[Path] = None,
@@ -451,7 +519,6 @@ def sample_and_evaluate(
             results = sampler.sample(
                 num_samples=num_samples,
                 num_steps=num_steps,
-                synth_target=synth_target,
                 cfg_scale=cfg_scale,
                 gradient_weight=gradient_weight,
             )
@@ -469,7 +536,6 @@ def sample_and_evaluate(
                 num_samples=num_samples,
                 num_steps=num_steps,
                 property_targets=sample_property_targets if stage == "c" else None,
-                synth_target=synth_target,
                 cfg_scale=cfg_scale,
                 gradient_weight=gradient_weight,
                 include_properties=include_properties,
@@ -596,13 +662,13 @@ def main() -> None:
         epilog="""
 Examples:
   # Stage A: Small molecules
-  polydiff-eval --stage a --ckpt stage_a.pt --vocab vocab.txt --config config.yaml --num 1000 --training-data data/molecules.jsonl.gz
+  polydiff-eval --stage a --ckpt Results/stage_a/character/best_model.pt --config config.yaml --num 1000 --training-data data/molecules.jsonl.gz
 
   # Stage B: Polymers
-  polydiff-eval --stage b --ckpt stage_b.pt --vocab vocab.txt --config config.yaml --num 1000 --training-data data/polymers.jsonl.gz
+  polydiff-eval --stage b --ckpt Results/stage_b/character/best_model.pt --config config.yaml --num 1000 --training-data data/polymers.jsonl.gz
 
   # Stage C: Property-guided (Tg model)
-  polydiff-eval --stage c --ckpt stage_c_tg.pt --vocab vocab.txt --config config.yaml --num 1000 \\
+  polydiff-eval --stage c --ckpt Results/stage_c/Tg/character/best_model.pt --config config.yaml --num 1000 \\
     --target-property Tg --property-range Tg 200 400 --cfg 2.0 --grad 0.3
         """,
     )
@@ -610,7 +676,7 @@ Examples:
     # Required arguments
     parser.add_argument("--stage", type=str, choices=["a", "b", "c"], required=True, help="Training stage")
     parser.add_argument("--ckpt", type=str, required=True, help="Checkpoint path")
-    parser.add_argument("--vocab", type=str, required=True, help="Vocabulary file")
+    parser.add_argument("--vocab", type=str, help="Vocabulary file (auto-detected when omitted)")
     parser.add_argument("--config", type=str, required=True, help="Model config YAML")
 
     # Sampling parameters
@@ -635,7 +701,6 @@ Examples:
     # Guidance parameters
     parser.add_argument("--cfg", type=float, default=1.0, help="CFG scale")
     parser.add_argument("--grad", type=float, default=0.0, help="Gradient guidance weight")
-    parser.add_argument("--s_target", type=float, help="Synthesis score target")
 
     # Training data for novelty
     parser.add_argument("--training-data", type=str, help="Training data path for novelty computation")
@@ -654,7 +719,7 @@ Examples:
         parser.error("Stage C requires --target-property")
 
     checkpoint_path = Path(args.ckpt)
-    vocab_path = Path(args.vocab)
+    vocab_path = _resolve_vocab_path(args.stage, checkpoint_path, args.vocab)
     config_path = Path(args.config)
     output_path = Path(args.output) if args.output else None
     training_data_path = Path(args.training_data) if args.training_data else None
@@ -678,7 +743,6 @@ Examples:
         output_path=output_path,
         property_targets=property_targets,
         target_property=args.target_property,
-        synth_target=args.s_target,
         cfg_scale=args.cfg,
         gradient_weight=args.grad,
         training_data_path=training_data_path,

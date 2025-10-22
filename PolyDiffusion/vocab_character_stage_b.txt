@@ -1,0 +1,45 @@
+# TOKENIZATION_METHOD: AnchorCharacterVocab
+# VOCAB_SIZE: 42
+# CREATED: 2025-10-22T10:03:20.259396
+<PAD>
+<BOS>
+<EOS>
+<MASK>
+<UNK>
+[Zz]
+[Zr]
+C
+c
+(
+)
+O
+=
+1
+N
+2
+F
+S
+/
+3
+[
+]
+4
+i
+#
+l
+P
+5
+H
+n
+\
+s
+6
+o
+a
+B
+7
+K
+8
+p
+e
+b

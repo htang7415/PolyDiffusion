@@ -1,10 +1,18 @@
 # Stage C Configuration: Td (Decomposition Temperature) Property Training
 
-vocab_path: PolyDiffusion/vocab_stage_bc.txt
+# Tokenization configuration (must match Stage B vocabulary)
+tokenization:
+  method: "atom_regex"
+  vocab_path: ""  # Leave blank to auto-discover Stage B vocabulary
+
+# Backward compatibility
+vocab_path: ""  # Backward-compat override (leave blank for auto)
 model_config: PolyDiffusion/configs/model_base.yaml
 target_property: Td
-pretrained_checkpoint: Results/stage_b/best_model.pt
+pretrained_checkpoint: ""
 freeze_backbone: false
+stage_b_results_dir: Results/stage_b  # Override if Stage B outputs live elsewhere
+# stage_b_method: atom_regex  # Uncomment to override Stage B tokenizer if different
 results_dir: Results/stage_c/Td
 
 data:
@@ -27,7 +35,6 @@ training:
   pin_memory: true
 
 loss:
-  lambda_syn: 0.5
   lambda_prop: 1.0
   lambda_gram: 0.1
 

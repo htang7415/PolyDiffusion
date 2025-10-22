@@ -103,5 +103,4 @@ PYTHONPATH="$ROOT" python -m PolyDiffusion.scripts.sample_cli \
   --vocab "$VOCAB_PATH" \
   --config "$ROOT/configs/model_base.yaml" \
   --num 5 \
-  --steps 3 \
-  --s_target 3.5
+  --steps 3

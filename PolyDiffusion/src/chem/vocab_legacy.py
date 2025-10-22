@@ -7,7 +7,7 @@ New code should use:
 
 from __future__ import annotations
 
-# Backward compatibility: re-export from character_vocab
+# Backward compatibility: re-export AnchorCharacterVocab as AnchorSafeVocab
 from .ap_smiles import SHIELD1, SHIELD2
 from .character_vocab import AnchorCharacterVocab as AnchorSafeVocab
 from .character_vocab import _split_shielded

@@ -9,11 +9,13 @@ import time
 from itertools import cycle, islice
 from pathlib import Path
 from typing import Callable
+import shutil
 
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from ..chem.plain_vocab import PlainVocab
+from ..chem.vocab_config import load_tokenization_config
+from ..chem.vocab_factory import load_vocabulary_auto
 from ..losses.objectives import stage_a_objective
 from ..utils.logging import configure_logging
 from .common import (
@@ -65,27 +67,52 @@ def run_stage_a(config_path: str) -> None:
     # Load dataset first
     dataset = build_stage_dataset("a", cfg["data"])
 
+    # Load tokenization configuration
+    tok_config = load_tokenization_config(cfg)
+    log.info(f"Using tokenization method: {tok_config.method}")
+
+    # Determine output directory (per tokenization method)
+    base_results_dir = Path(cfg.get("results_dir", "Results/stage_a"))
+    results_dir = base_results_dir / tok_config.method
+    results_dir.mkdir(parents=True, exist_ok=True)
+
     # Auto-build vocabulary if not provided or doesn't exist
-    if "vocab_path" in cfg and cfg["vocab_path"]:
-        vocab_path = Path(cfg["vocab_path"])
-        if vocab_path.exists():
-            vocab = PlainVocab.load(vocab_path)
-            log.info(f"Loaded vocabulary from {vocab_path}")
-        else:
-            log.warning(f"Vocabulary file {vocab_path} not found. Building from dataset...")
-            vocab = build_vocab_from_dataset(dataset, "a", limit=cfg.get("vocab_limit", 10000))
-            vocab_path.parent.mkdir(parents=True, exist_ok=True)
-            vocab.save(vocab_path)
-            log.info(f"Saved vocabulary to {vocab_path}")
+    vocab_path = Path(tok_config.vocab_path) if tok_config.vocab_path else None
+
+    if vocab_path and vocab_path.exists():
+        vocab = load_vocabulary_auto(vocab_path, tok_config)
+        log.info(f"Loaded {tok_config.method} vocabulary from {vocab_path}")
+        alias_path = results_dir / "vocab.txt"
+        if alias_path != vocab_path and not alias_path.exists():
+            try:
+                shutil.copy2(vocab_path, alias_path)
+                log.info(f"Copied vocabulary alias to {alias_path}")
+            except Exception as exc:  # pragma: no cover - best effort
+                log.warning(f"Failed to copy vocabulary alias to {alias_path}: {exc}")
     else:
-        log.info("No vocab_path specified. Building vocabulary from dataset...")
-        vocab = build_vocab_from_dataset(dataset, "a", limit=cfg.get("vocab_limit", 10000))
-        # Save to default location
-        results_dir = Path(cfg.get("results_dir", "Results/stage_a"))
-        vocab_path = results_dir / "vocab.txt"
+        if vocab_path:
+            log.warning(f"Vocabulary file {vocab_path} not found. Building from dataset...")
+        else:
+            log.info("No vocab_path specified. Building vocabulary from dataset...")
+            # Default vocab path in results directory
+            vocab_path = results_dir / f"vocab_{tok_config.method}_stage_a.txt"
+
+        vocab = build_vocab_from_dataset(
+            dataset,
+            "a",
+            tok_config,
+            limit=tok_config.vocab_limit_samples
+        )
         vocab_path.parent.mkdir(parents=True, exist_ok=True)
         vocab.save(vocab_path)
-        log.info(f"Saved vocabulary to {vocab_path}")
+        log.info(f"Built {tok_config.method} vocabulary with {len(vocab)} tokens, saved to {vocab_path}")
+        alias_path = results_dir / "vocab.txt"
+        if alias_path != vocab_path:
+            try:
+                shutil.copy2(vocab_path, alias_path)
+                log.info(f"Copied vocabulary alias to {alias_path}")
+            except Exception as exc:  # pragma: no cover - best effort
+                log.warning(f"Failed to copy vocabulary alias to {alias_path}: {exc}")
 
     model_cfg = load_yaml(Path(cfg["model_config"]))
     model = build_model(vocab, model_cfg)
@@ -146,10 +173,6 @@ def run_stage_a(config_path: str) -> None:
 
     log_interval = train_cfg.get("log_interval", 10)
     save_interval = train_cfg.get("save_interval", 500)
-
-    # Setup Results directory
-    results_dir = Path(cfg.get("results_dir", "Results/stage_a"))
-    results_dir.mkdir(parents=True, exist_ok=True)
     log.info(f"Results will be saved to {results_dir}")
 
     # Best model tracking
@@ -224,11 +247,10 @@ def run_stage_a(config_path: str) -> None:
         if step % log_interval == 0:
             current_lr = optimizer.param_groups[0]['lr']
             log.info(
-                "step=%d loss_total=%.4f loss_diff=%.4f loss_syn=%.4f lr=%.2e",
+                "step=%d loss_total=%.4f loss_diff=%.4f lr=%.2e",
                 step,
                 loss_values.get("total", float("nan")),
                 loss_values.get("diffusion", float("nan")),
-                loss_values.get("synth", float("nan")),
                 current_lr,
             )
 

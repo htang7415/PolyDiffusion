@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from .diffusion_token import CategoricalDiffusion, DiffusionConfig
-from .heads import GrammarHead, PropertyHeads, SynthesisHead, pooled_representation
+from .heads import GrammarHead, PropertyHeads, pooled_representation
 from .modules import TransformerBackbone
 
 
@@ -33,7 +33,7 @@ class ConditionNet(nn.Module):
     def __init__(self, property_names: Iterable[str], hidden_size: int) -> None:
         super().__init__()
         self.property_names = list(property_names)
-        input_dim = len(self.property_names) + 1  # plus synthesis target
+        input_dim = len(self.property_names)
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_size),
             nn.SiLU(),
@@ -43,7 +43,6 @@ class ConditionNet(nn.Module):
     def forward(
         self,
         properties: Optional[Dict[str, torch.Tensor]],
-        s_target: Optional[torch.Tensor],
         batch_size: int,
         device: torch.device,
     ) -> torch.Tensor:
@@ -55,10 +54,7 @@ class ConditionNet(nn.Module):
                 feats.append(properties[name].unsqueeze(-1).float())
             else:
                 feats.append(torch.zeros(batch_size, 1, device=device))
-        if s_target is None:
-            s_target = torch.zeros(batch_size, device=device)
-        feats.append(s_target.unsqueeze(-1).float())
-        features = torch.cat(feats, dim=-1)
+        features = torch.cat(feats, dim=-1) if feats else torch.zeros(batch_size, 0, device=device)
         return self.net(features)
 
 
@@ -89,7 +85,6 @@ class DiffusionTransformer(nn.Module):
         )
         self.head = nn.Linear(model_config.hidden_size, model_config.vocab_size)
         self.property_heads = PropertyHeads(model_config.hidden_size, model_config.property_names)
-        self.synth_head = SynthesisHead(model_config.hidden_size)
         self.grammar_head = GrammarHead(model_config.hidden_size)
         self.diffusion = CategoricalDiffusion(diffusion_config)
         self.cfg_dropout = model_config.cfg_dropout
@@ -100,7 +95,6 @@ class DiffusionTransformer(nn.Module):
         timesteps: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         properties: Optional[Dict[str, torch.Tensor]] = None,
-        s_target: Optional[torch.Tensor] = None,
         condition_dropout_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         batch, seq_len = tokens.shape
@@ -117,7 +111,7 @@ class DiffusionTransformer(nn.Module):
         x = self.token_embed(tokens) + timed + self.pos_embed[:, :seq_len, :]
         x = self.dropout(x)
 
-        cond_emb = self.condition_net(properties, s_target, batch, device)
+        cond_emb = self.condition_net(properties, batch, device)
         if condition_dropout_mask is None and self.training and self.cfg_dropout > 0.0:
             condition_dropout_mask = torch.rand(batch, device=device) < self.cfg_dropout
         if condition_dropout_mask is not None:
@@ -131,15 +125,14 @@ class DiffusionTransformer(nn.Module):
         logits = self.head(hidden)
         pooled = pooled_representation(hidden, attention_mask)
         property_preds = self.property_heads(pooled)
-        synth_pred = self.synth_head(pooled)
         grammar_logits = self.grammar_head(pooled)
         grammar_pred = torch.sigmoid(grammar_logits)
 
         return {
             "logits": logits,
+            "hidden": hidden,  # For gradient guidance
             "pooled": pooled,
             "property_preds": property_preds,
-            "synth_pred": synth_pred,
             "grammar_logits": grammar_logits,
             "grammar_pred": grammar_pred,
             "cond_emb": cond_emb,

@@ -6,12 +6,13 @@ import logging
 from typing import Iterable, List, Sequence
 
 from ..chem.ap_smiles import SHIELD1, SHIELD2, unshield_anchors
-from ..chem.vocab import AnchorSafeVocab
+from ..chem.base_vocab import BaseVocabulary
+from ..chem.vocab import AnchorSafeVocab  # Backward compat
 
 log = logging.getLogger(__name__)
 
 
-def _build_shielded_tokens(vocab: AnchorSafeVocab, sequence: Sequence[int]) -> List[str]:
+def _build_shielded_tokens(vocab: BaseVocabulary, sequence: Sequence[int]) -> List[str]:
     """Convert token ids to shielded tokens without special markers."""
     specials = {vocab.pad_id, vocab.bos_id, vocab.eos_id}
     tokens: List[str] = []
@@ -25,11 +26,11 @@ def _build_shielded_tokens(vocab: AnchorSafeVocab, sequence: Sequence[int]) -> L
     return tokens
 
 
-def _build_shielded_string(vocab: AnchorSafeVocab, sequence: Sequence[int]) -> str:
+def _build_shielded_string(vocab: BaseVocabulary, sequence: Sequence[int]) -> str:
     return "".join(_build_shielded_tokens(vocab, sequence))
 
 
-def _fallback_decode(vocab: AnchorSafeVocab, sequence: Sequence[int]) -> str:
+def _fallback_decode(vocab: BaseVocabulary, sequence: Sequence[int]) -> str:
     """Gracefully recover a string when detokenisation fails.
 
     The fallback removes any existing anchor markers, wraps the payload between
@@ -86,24 +87,32 @@ def _fallback_decode(vocab: AnchorSafeVocab, sequence: Sequence[int]) -> str:
 
 
 def decode_tokens(
-    vocab: AnchorSafeVocab,
+    vocab: BaseVocabulary,
     sequences: Iterable[Sequence[int]],
     strict: bool = False,
 ) -> List[str]:
-    """Convert sequences of token ids back to AP-SMILES strings.
+    """Convert sequences of token ids back to SMILES strings.
+
+    Works with any tokenization method (character, atom-regex, or SAFE).
+    For SAFE vocabularies, automatically converts SAFE → canonical SMILES.
 
     Args:
-        vocab: Anchor-safe vocabulary used for tokenisation.
+        vocab: Vocabulary used for tokenisation (any BaseVocabulary subclass).
         sequences: Iterable of token id sequences.
         strict: When ``True`` re-raise decoding errors instead of returning empty strings.
 
     Returns:
-        List of decoded AP-SMILES strings. Invalid sequences fall back to a best-effort reconstruction.
+        List of decoded SMILES strings (plain for Stage A, AP-SMILES for Stage B/C).
+        Invalid sequences fall back to a best-effort reconstruction.
     """
     decoded: List[str] = []
     for seq in sequences:
         try:
-            decoded.append(vocab.detokenize_ap(seq))
+            # Use unified detokenize() interface
+            # This works for all vocab types:
+            # - Character/Atom-regex: returns SMILES directly
+            # - SAFE: converts SAFE → canonical SMILES internally
+            decoded.append(vocab.detokenize(seq))
         except (ValueError, IndexError):
             if strict:
                 raise

@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 import time
 from itertools import cycle
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from ..chem.ap_smiles import SHIELD1, SHIELD2
-from ..chem.vocab import AnchorSafeVocab
+from ..chem.vocab_config import load_tokenization_config
+from ..chem.vocab_factory import load_vocabulary_auto
 from ..losses.objectives import stage_b_objective
 from ..utils.logging import configure_logging
 from .common import (
@@ -57,6 +59,32 @@ def _get_peak_memory_mb() -> float:
     return 0.0
 
 
+def _extract_checkpoint_step(path: Path) -> int:
+    match = re.search(r"checkpoint_step_(\d+)", path.stem)
+    return int(match.group(1)) if match else -1
+
+
+def _find_stage_checkpoint(base_dir: Path, method: str) -> Optional[Path]:
+    """Find a Stage A checkpoint for a given tokenisation method."""
+    search_dirs = [base_dir / method, base_dir]
+    for directory in search_dirs:
+        directory = directory.expanduser()
+        if not directory.exists():
+            continue
+        for name in ("best_model.pt", "final_model.pt"):
+            candidate = directory / name
+            if candidate.exists():
+                return candidate
+        checkpoints = sorted(
+            directory.glob("checkpoint_step_*.pt"),
+            key=_extract_checkpoint_step,
+            reverse=True,
+        )
+        if checkpoints:
+            return checkpoints[0]
+    return None
+
+
 def run_stage_b(config_path: str) -> None:
     cfg = load_yaml(Path(config_path))
     configure_logging()
@@ -67,27 +95,38 @@ def run_stage_b(config_path: str) -> None:
     # Load dataset first
     dataset = build_stage_dataset("b", cfg["data"])
 
+    # Load tokenization configuration
+    tok_config = load_tokenization_config(cfg)
+    log.info(f"Using tokenization method: {tok_config.method}")
+
+    # Determine results directory per tokenization method
+    base_results_dir = Path(cfg.get("results_dir", "Results/stage_b"))
+    results_dir = base_results_dir / tok_config.method
+    results_dir.mkdir(parents=True, exist_ok=True)
+
     # Auto-build vocabulary if not provided or doesn't exist
-    if "vocab_path" in cfg and cfg["vocab_path"]:
-        vocab_path = Path(cfg["vocab_path"])
-        if vocab_path.exists():
-            vocab = AnchorSafeVocab.load(vocab_path)
-            log.info(f"Loaded vocabulary from {vocab_path}")
-        else:
-            log.warning(f"Vocabulary file {vocab_path} not found. Building from dataset...")
-            vocab = build_vocab_from_dataset(dataset, "b", limit=cfg.get("vocab_limit", 10000))
-            vocab_path.parent.mkdir(parents=True, exist_ok=True)
-            vocab.save(vocab_path)
-            log.info(f"Saved vocabulary to {vocab_path}")
+    vocab_path = Path(tok_config.vocab_path) if tok_config.vocab_path else None
+
+    if vocab_path and vocab_path.exists():
+        vocab = load_vocabulary_auto(vocab_path, tok_config)
+        log.info(f"Loaded {tok_config.method} vocabulary from {vocab_path}")
     else:
-        log.info("No vocab_path specified. Building vocabulary from dataset...")
-        vocab = build_vocab_from_dataset(dataset, "b", limit=cfg.get("vocab_limit", 10000))
-        # Save to default location
-        results_dir = Path(cfg.get("results_dir", "Results/stage_b"))
-        vocab_path = results_dir / "vocab.txt"
+        if vocab_path:
+            log.warning(f"Vocabulary file {vocab_path} not found. Building from dataset...")
+        else:
+            log.info("No vocab_path specified. Building vocabulary from dataset...")
+            # Default vocab path in results directory
+            vocab_path = results_dir / f"vocab_{tok_config.method}_stage_b.txt"
+
+        vocab = build_vocab_from_dataset(
+            dataset,
+            "b",
+            tok_config,
+            limit=tok_config.vocab_limit_samples
+        )
         vocab_path.parent.mkdir(parents=True, exist_ok=True)
         vocab.save(vocab_path)
-        log.info(f"Saved vocabulary to {vocab_path}")
+        log.info(f"Built {tok_config.method} vocabulary with {len(vocab)} tokens, saved to {vocab_path}")
 
     model_cfg = load_yaml(Path(cfg["model_config"]))
 
@@ -114,11 +153,28 @@ def run_stage_b(config_path: str) -> None:
 
     if mode == "stage_a":
         checkpoint_value = init_cfg.get("checkpoint")
-        if not checkpoint_value:
-            raise ValueError("Stage B initialization mode 'stage_a' requires a 'checkpoint' path.")
-        pretrained_path = Path(checkpoint_value)
-        if not pretrained_path.exists():
-            raise FileNotFoundError(f"Stage A checkpoint not found: {pretrained_path}")
+        stage_a_results_dir = Path(cfg.get("stage_a_results_dir", "Results/stage_a"))
+        stage_a_method = init_cfg.get("stage_a_method", tok_config.method)
+        pretrained_path: Optional[Path] = None
+        if checkpoint_value:
+            candidate_path = Path(checkpoint_value).expanduser()
+            if candidate_path.exists():
+                pretrained_path = candidate_path
+            else:
+                log.warning("Specified Stage A checkpoint not found: %s", candidate_path)
+        if pretrained_path is None:
+            fallback_checkpoint = _find_stage_checkpoint(
+                stage_a_results_dir,
+                stage_a_method,
+            )
+            if fallback_checkpoint is not None:
+                log.info("Using Stage A checkpoint fallback at %s", fallback_checkpoint)
+                pretrained_path = fallback_checkpoint
+        if pretrained_path is None:
+            raise FileNotFoundError(
+                "Stage A checkpoint not found. Set 'initialization.checkpoint' or ensure a checkpoint exists under "
+                f"{stage_a_results_dir}/<method>/."
+            )
 
         vocab_candidate = init_cfg.get("vocab_path")
         stage_a_vocab_path: Path | None = None
@@ -128,10 +184,25 @@ def run_stage_b(config_path: str) -> None:
                 raise FileNotFoundError(f"Specified Stage A vocab_path does not exist: {candidate_path}")
             stage_a_vocab_path = candidate_path
         else:
-            fallback_candidates = [
-                pretrained_path.parent / "vocab.txt",
-                Path("Results/stage_a/vocab.txt"),
-            ]
+            fallback_candidates = [pretrained_path.parent / "vocab.txt"]
+            stage_a_results_base = stage_a_results_dir
+            if stage_a_results_base.exists():
+                # Search method-specific subdirectories first
+                method_dirs = [
+                    stage_a_results_base / stage_a_method,
+                    stage_a_results_base,
+                ]
+                for directory in method_dirs:
+                    if directory and directory.exists():
+                        for candidate in sorted(directory.glob("**/vocab*.txt")):
+                            fallback_candidates.append(candidate)
+            # Repository defaults as last resort
+            fallback_candidates.extend(
+                [
+                    Path("PolyDiffusion/vocab_character_stage_a.txt"),
+                    Path("PolyDiffusion/vocab.txt"),
+                ]
+            )
             for candidate in fallback_candidates:
                 if candidate and candidate.exists():
                     stage_a_vocab_path = candidate
@@ -229,8 +300,6 @@ def run_stage_b(config_path: str) -> None:
     lambda_gram = cfg["loss"].get("lambda_gram", 0.1)
 
     # Setup Results directory
-    results_dir = Path(cfg.get("results_dir", "Results/stage_b"))
-    results_dir.mkdir(parents=True, exist_ok=True)
     log.info(f"Results will be saved to {results_dir}")
 
     results_vocab_path = results_dir / "vocab.txt"
@@ -327,11 +396,10 @@ def run_stage_b(config_path: str) -> None:
         if step % log_interval == 0:
             current_lr = optimizer.param_groups[0]['lr']
             log.info(
-                "step=%d loss_total=%.4f loss_diff=%.4f loss_syn=%.4f loss_gram=%.4f lr=%.2e",
+                "step=%d loss_total=%.4f loss_diff=%.4f loss_gram=%.4f lr=%.2e",
                 step,
                 loss_values.get("total", float("nan")),
                 loss_values.get("diffusion", float("nan")),
-                loss_values.get("synth", float("nan")),
                 loss_values.get("grammar", float("nan")),
                 current_lr,
             )

@@ -13,8 +13,11 @@ from torch.utils.data import DataLoader
 from ..chem import valence as valence_utils
 from ..chem.ap_smiles import ANCHOR1, ANCHOR2
 from ..chem import convert_polymer_to_ap_smiles
-from ..chem.vocab import AnchorSafeVocab
-from ..chem.plain_vocab import PlainVocab
+from ..chem.base_vocab import BaseVocabulary
+from ..chem.vocab import AnchorSafeVocab  # Backward compat
+from ..chem.plain_vocab import PlainVocab  # Backward compat
+from ..chem.vocab_config import TokenizationConfig, load_tokenization_config
+from ..chem.vocab_factory import create_vocabulary, load_vocabulary_auto
 from ..data.collate import collate_token_batch
 from ..data.datasets import CsvDataset, DatasetConfig, JsonlDataset
 from ..models.dit_token import DiffusionTransformer, ModelConfig
@@ -102,22 +105,30 @@ def _extract_optional_float(record: Record, keys: Sequence[str], default: float 
 def build_vocab_from_dataset(
     dataset,
     stage: str,
-    limit: int | None = 10000,
-) -> PlainVocab | AnchorSafeVocab:
+    tokenization_config: TokenizationConfig,
+    limit: Optional[int] = None,
+) -> BaseVocabulary:
     """
-    Build vocabulary automatically from dataset.
+    Build vocabulary automatically from dataset using configured tokenization method.
 
     Args:
         dataset: Dataset to build vocab from
-        stage: "a" for PlainVocab, "b" or "c" for AnchorSafeVocab
-        limit: Max number of samples to use for vocab building
+        stage: "a", "b", or "c"
+        tokenization_config: Tokenization configuration
+        limit: Max number of samples to use (overrides config if provided)
 
     Returns:
-        Vocabulary (PlainVocab for Stage A, AnchorSafeVocab for Stage B/C)
+        BaseVocabulary instance (method determined by tokenization_config)
     """
     log = logging.getLogger(__name__)
-    log.info(f"Building vocabulary from dataset (limit={limit})...")
 
+    # Use provided limit or fall back to config
+    if limit is None:
+        limit = tokenization_config.vocab_limit_samples
+
+    log.info(f"Building {tokenization_config.method} vocabulary from dataset (limit={limit})...")
+
+    # Extract corpus from dataset
     corpus = []
     count = 0
     for record in dataset:
@@ -158,14 +169,16 @@ def build_vocab_from_dataset(
     if not corpus:
         raise RuntimeError("No valid SMILES found in dataset to build vocabulary")
 
-    log.info(f"Building vocabulary from {len(corpus)} SMILES strings...")
+    log.info(f"Extracted {len(corpus)} SMILES strings from dataset")
 
-    if stage == "a":
-        vocab = PlainVocab.build(corpus)
-        log.info(f"Built PlainVocab with {len(vocab)} tokens")
-    else:
-        vocab = AnchorSafeVocab.build(corpus)
-        log.info(f"Built AnchorSafeVocab with {len(vocab)} tokens (includes [Zz]/[Zr])")
+    # Use factory to create vocabulary
+    vocab = create_vocabulary(
+        config=tokenization_config,
+        stage=stage,
+        corpus=corpus
+    )
+
+    log.info(f"Built vocabulary with {len(vocab)} tokens using {tokenization_config.method} tokenization")
 
     return vocab
 
@@ -240,7 +253,7 @@ def build_stage_dataset(
         return dataset_cls(config, required_fields=set())
 
     property_fields = set(property_names or PROPERTY_NAMES)
-    required = {"ap_smiles", "synth_score"} | property_fields
+    required = {"ap_smiles"} | property_fields
     return dataset_cls(config, required_fields=required)
 
 
@@ -248,7 +261,7 @@ def default_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def collate_stage_a(records: List[Dict[str, object]], vocab: PlainVocab) -> Dict[str, torch.Tensor]:
+def collate_stage_a(records: List[Dict[str, object]], vocab: BaseVocabulary) -> Dict[str, torch.Tensor]:
     """
     Collate Stage A batch (small molecules without attachment points).
 
@@ -271,15 +284,10 @@ def collate_stage_a(records: List[Dict[str, object]], vocab: PlainVocab) -> Dict
         tokens.append(vocab.tokenize(str(record[smiles_key])))
     batch = collate_token_batch(tokens, vocab.pad_id)
 
-    # Use synthesis score if available, otherwise default to 0.0
-    synth_values = [_extract_optional_float(record, SYNTH_SCORE_KEYS) for record in records]
-    synth = torch.tensor(synth_values, dtype=torch.float32)
-
-    batch["synth"] = synth
     return batch
 
 
-def collate_stage_b(records: List[Dict[str, object]], vocab: AnchorSafeVocab) -> Dict[str, torch.Tensor]:
+def collate_stage_b(records: List[Dict[str, object]], vocab: BaseVocabulary) -> Dict[str, torch.Tensor]:
     """
     Collate Stage B batch (polymers with attachment points).
 
@@ -292,8 +300,6 @@ def collate_stage_b(records: List[Dict[str, object]], vocab: AnchorSafeVocab) ->
     if "ap_smiles" in records[0]:
         # Preprocessed format
         aps = [str(r["ap_smiles"]) for r in records]
-        synth_values = [_extract_optional_float(record, SYNTH_SCORE_KEYS) for record in records]
-        synth = torch.tensor(synth_values, dtype=torch.float32)
     else:
         # Raw CSV/GZ format - need to convert
         smiles_key = _find_first_key(records[0], RAW_POLYMER_SMILES_KEYS)
@@ -315,16 +321,11 @@ def collate_stage_b(records: List[Dict[str, object]], vocab: AnchorSafeVocab) ->
                     "Ensure each repeat unit has exactly two attachment points ('*' or '[*]')."
                 ) from e
 
-        # Use synthesis score if available, otherwise default to 0.0
-        synth_values = [_extract_optional_float(record, SYNTH_SCORE_KEYS) for record in records]
-        synth = torch.tensor(synth_values, dtype=torch.float32)
-
-    # Tokenize AP-SMILES
-    tokens = [vocab.tokenize_ap(ap) for ap in aps]
+    # Tokenize AP-SMILES (use unified tokenize() interface)
+    tokens = [vocab.tokenize(ap) for ap in aps]
     batch = collate_token_batch(tokens, vocab.pad_id)
     anchor_count = torch.tensor([ap.count(ANCHOR1) + ap.count(ANCHOR2) for ap in aps], dtype=torch.int64)
     valence = torch.tensor([1.0 if valence_utils.valence_ok(ap) else 0.0 for ap in aps], dtype=torch.float32)
-    batch["synth"] = synth
     batch["anchor_count"] = anchor_count
     batch["valence"] = valence
     return batch
@@ -332,21 +333,18 @@ def collate_stage_b(records: List[Dict[str, object]], vocab: AnchorSafeVocab) ->
 
 def collate_stage_c(
     records: List[Dict[str, object]],
-    vocab: AnchorSafeVocab,
+    vocab: BaseVocabulary,
     property_names: Sequence[str] = PROPERTY_NAMES,
 ) -> Dict[str, torch.Tensor]:
     aps = [str(r["ap_smiles"]) for r in records]
-    tokens = [vocab.tokenize_ap(ap) for ap in aps]
+    tokens = [vocab.tokenize(ap) for ap in aps]  # Use unified tokenize() interface
     batch = collate_token_batch(tokens, vocab.pad_id)
-    synth_values = [_extract_optional_float(record, SYNTH_SCORE_KEYS) for record in records]
-    synth = torch.tensor(synth_values, dtype=torch.float32)
     properties: Dict[str, torch.Tensor] = {}
     for name in property_names:
         values = torch.tensor([float(r[name]) for r in records], dtype=torch.float32)
         properties[name] = values
     anchor_count = torch.tensor([ap.count(ANCHOR1) + ap.count(ANCHOR2) for ap in aps], dtype=torch.int64)
     valence = torch.tensor([1.0 if valence_utils.valence_ok(ap) else 0.0 for ap in aps], dtype=torch.float32)
-    batch["synth"] = synth
     batch["properties"] = properties
     batch["anchor_count"] = anchor_count
     batch["valence"] = valence
@@ -410,19 +408,20 @@ def save_checkpoint(
     torch.save(checkpoint, path)
 
 
-def _load_vocab_auto(path: Path) -> PlainVocab | AnchorSafeVocab:
-    """Load a vocabulary file without requiring the caller to know the class."""
-    tokens = path.read_text(encoding="utf-8").splitlines()
-    if "[Zz]" in tokens and "[Zr]" in tokens:
-        return AnchorSafeVocab(tokens)
-    return PlainVocab(tokens)
+def _load_vocab_auto(path: Path, tokenization_config: Optional[TokenizationConfig] = None) -> BaseVocabulary:
+    """
+    Load a vocabulary file without requiring the caller to know the class.
+
+    Uses the new load_vocabulary_auto() from vocab_factory for proper detection.
+    """
+    return load_vocabulary_auto(path, tokenization_config)
 
 
 def _transfer_vocab_parameters(
     model: DiffusionTransformer,
     state_dict: Dict[str, torch.Tensor],
-    target_vocab: PlainVocab | AnchorSafeVocab,
-    source_vocab: PlainVocab | AnchorSafeVocab,
+    target_vocab: BaseVocabulary,
+    source_vocab: BaseVocabulary,
     reuse_token_embeddings: bool,
     reuse_output_head: bool,
 ) -> Tuple[int, int]:

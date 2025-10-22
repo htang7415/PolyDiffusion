@@ -1,4 +1,4 @@
-vocab_path: PolyDiffusion/vocab_stage_bc.txt
+vocab_path: ""  # Leave blank to auto-discover Stage B vocabulary
 model_config: PolyDiffusion/configs/model_base.yaml
 data:
   path: data/homopolymers.csv
@@ -8,9 +8,10 @@ training:
   steps: 200
   log_interval: 20
 loss:
-  lambda_syn: 0.5
   lambda_prop: 1.0
   lambda_gram: 0.1
 sampling:
   cfg_scale: 1.5
   gradient_weight: 0.1
+stage_b_results_dir: Results/stage_b  # Override if Stage B outputs live elsewhere
+# stage_b_method: atom_regex  # Uncomment to override Stage B tokenizer if different

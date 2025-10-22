@@ -1,0 +1,36 @@
+# TOKENIZATION_METHOD: PlainCharacterVocab
+# VOCAB_SIZE: 33
+# CREATED: 2025-10-22T10:01:13.922401
+<PAD>
+<BOS>
+<EOS>
+<MASK>
+<UNK>
+C
+=
+(
+)
+O
+N
+1
+2
+3
+@
+4
+S
+[
+]
+l
+H
+F
+/
+5
+#
+\
+P
+i
+6
+7
+8
+9
+0

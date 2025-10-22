@@ -8,16 +8,19 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 import time
 from itertools import cycle
 from pathlib import Path
+from typing import Optional
 
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from ..chem.ap_smiles import SHIELD1, SHIELD2
-from ..chem.vocab import AnchorSafeVocab
+from ..chem.vocab_config import load_tokenization_config
+from ..chem.vocab_factory import load_vocabulary_auto
 from ..losses.objectives import stage_c_objective
 from ..utils.logging import configure_logging
 from .common import (
@@ -59,24 +62,144 @@ def _get_peak_memory_mb() -> float:
     return 0.0
 
 
+def _resolve_stage_c_vocab(tok_config, cfg, stage_b_method: str) -> Path:
+    """Locate a Stage C vocabulary when not explicitly provided."""
+    seen: set[str] = set()
+    candidates: list[Path] = []
+
+    def enqueue(path: Path | str | None) -> None:
+        if path is None:
+            return
+        path = Path(path).expanduser()
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            candidates.append(path)
+
+    def enqueue_dir(directory: Path | str, recursive: bool = True) -> None:
+        directory = Path(directory).expanduser()
+        if not directory.exists():
+            return
+        pattern = "**/vocab*.txt" if recursive else "vocab*.txt"
+        for file in sorted(directory.glob(pattern)):
+            if file.is_file():
+                enqueue(file)
+
+    explicit = Path(tok_config.vocab_path).expanduser() if tok_config.vocab_path else None
+    if explicit:
+        if explicit.is_dir():
+            enqueue_dir(explicit, recursive=True)
+        else:
+            enqueue(explicit)
+
+    pretrained_path_str = cfg.get("pretrained_checkpoint")
+    if pretrained_path_str:
+        pretrained_path = Path(pretrained_path_str).expanduser()
+        if pretrained_path.exists():
+            ckpt_dir = pretrained_path.parent
+            enqueue(ckpt_dir / "vocab.txt")
+            enqueue_dir(ckpt_dir, recursive=False)
+            enqueue_dir(ckpt_dir, recursive=True)
+
+    stage_b_base = Path(cfg.get("stage_b_results_dir", "Results/stage_b"))
+    if stage_b_base.exists():
+        enqueue_dir(stage_b_base / stage_b_method, recursive=True)
+        enqueue_dir(stage_b_base, recursive=True)
+
+    stage_c_base = Path(cfg.get("results_dir", "Results/stage_c"))
+    if stage_c_base.exists():
+        enqueue_dir(stage_c_base / tok_config.method, recursive=True)
+        enqueue_dir(stage_c_base, recursive=True)
+
+    repo_dir = Path("PolyDiffusion")
+    if repo_dir.exists():
+        enqueue_dir(repo_dir, recursive=False)
+
+    enqueue("PolyDiffusion/vocab_stage_bc.txt")
+    enqueue("PolyDiffusion/vocab_character_stage_b.txt")
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+
+    searched = "\n  ".join(str(path) for path in candidates) if candidates else "(no candidates)"
+    raise FileNotFoundError(
+        "Unable to locate a vocabulary file for Stage C. Checked the following locations:\n"
+        f"  {searched}"
+    )
+
+
+def _extract_checkpoint_step(path: Path) -> int:
+    match = re.search(r"checkpoint_step_(\d+)", path.stem)
+    return int(match.group(1)) if match else -1
+
+
+def _find_stage_checkpoint(base_dir: Path, method: str) -> Optional[Path]:
+    """Find a Stage B checkpoint for the requested tokenisation method."""
+    search_dirs = [base_dir / method, base_dir]
+    for directory in search_dirs:
+        directory = directory.expanduser()
+        if not directory.exists():
+            continue
+        for name in ("best_model.pt", "final_model.pt"):
+            candidate = directory / name
+            if candidate.exists():
+                return candidate
+        checkpoints = sorted(
+            directory.glob("checkpoint_step_*.pt"),
+            key=_extract_checkpoint_step,
+            reverse=True,
+        )
+        if checkpoints:
+            return checkpoints[0]
+    return None
+
+
 def run_stage_c(config_path: str) -> None:
     cfg = load_yaml(Path(config_path))
     configure_logging()
+    log = logging.getLogger(__name__)
 
     start_time = time.perf_counter()
 
-    vocab = AnchorSafeVocab.load(Path(cfg["vocab_path"]))
+    # Load tokenization configuration
+    tok_config = load_tokenization_config(cfg)
+    log.info(f"Using tokenization method: {tok_config.method}")
+
+    # Load vocabulary
+    stage_b_method = cfg.get("stage_b_method", tok_config.method)
+    vocab_path = _resolve_stage_c_vocab(tok_config, cfg, stage_b_method)
+    vocab = load_vocabulary_auto(vocab_path, tok_config)
+    log.info(f"Loaded {tok_config.method} vocabulary from {vocab_path}")
+
     model_cfg = load_yaml(Path(cfg["model_config"]))
 
-    # Load pretrained Stage B model if specified
-    if "pretrained_checkpoint" in cfg and cfg["pretrained_checkpoint"]:
-        pretrained_path = Path(cfg["pretrained_checkpoint"])
-        freeze_backbone = cfg.get("freeze_backbone", False)
-        model = load_pretrained_for_finetuning(pretrained_path, vocab, model_cfg, freeze_backbone)
-        log = logging.getLogger(__name__)
-        log.info(f"Loaded pretrained model from {pretrained_path}")
-    else:
-        model = build_model(vocab, model_cfg)
+    # Load pretrained Stage B model if specified (auto-detect when blank)
+    pretrained_value = cfg.get("pretrained_checkpoint")
+    pretrained_path: Optional[Path] = None
+    if pretrained_value:
+        candidate_path = Path(pretrained_value).expanduser()
+        if candidate_path.exists():
+            pretrained_path = candidate_path
+        else:
+            log.warning("Specified Stage B checkpoint not found: %s", candidate_path)
+
+    if pretrained_path is None:
+        stage_b_results_dir = Path(cfg.get("stage_b_results_dir", "Results/stage_b"))
+        fallback_checkpoint = _find_stage_checkpoint(stage_b_results_dir, stage_b_method)
+        if fallback_checkpoint is not None:
+            log.info("Using Stage B checkpoint fallback at %s", fallback_checkpoint)
+            pretrained_path = fallback_checkpoint
+
+    if pretrained_path is None:
+        raise FileNotFoundError(
+            "Stage C requires a Stage B checkpoint. Provide 'pretrained_checkpoint' in the config or "
+            "ensure a checkpoint exists under Results/stage_b/<method>/."
+        )
+
+    freeze_backbone = cfg.get("freeze_backbone", False)
+    model = load_pretrained_for_finetuning(pretrained_path, vocab, model_cfg, freeze_backbone)
+    log.info(f"Loaded pretrained model from {pretrained_path}")
 
     device = default_device()
     model.to(device)
@@ -130,13 +253,14 @@ def run_stage_c(config_path: str) -> None:
     log_interval = train_cfg.get("log_interval", 10)
     save_interval = train_cfg.get("save_interval", 200)
     lambda_prop = cfg["loss"]["lambda_prop"]
-    lambda_gram = cfg["loss"]["lambda_gram"]
+   lambda_gram = cfg["loss"]["lambda_gram"]
 
-    # Setup Results directory with property name
+    # Setup Results directory with property name and tokenization method
     if target_property:
-        results_dir = Path(cfg.get("results_dir", f"Results/stage_c/{target_property}"))
+        base_results_dir = Path(cfg.get("results_dir", f"Results/stage_c/{target_property}"))
     else:
-        results_dir = Path(cfg.get("results_dir", "Results/stage_c/multi_property"))
+        base_results_dir = Path(cfg.get("results_dir", "Results/stage_c/multi_property"))
+    results_dir = base_results_dir / tok_config.method
     results_dir.mkdir(parents=True, exist_ok=True)
     log.info(f"Results will be saved to {results_dir}")
 

@@ -101,6 +101,16 @@ def parse_targets(target_str: Optional[str]) -> Dict[str, float]:
     return targets
 
 
+def _collect_vocab_files(root: Path, recursive: bool = False) -> List[Path]:
+    """Return sorted list of vocabulary files under a directory tree."""
+    if not root.exists():
+        return []
+    if root.is_file():
+        return [root] if root.name.startswith("vocab") and root.suffix == ".txt" else []
+    pattern = "**/vocab*.txt" if recursive else "vocab*.txt"
+    return sorted(path for path in root.glob(pattern) if path.is_file())
+
+
 def _prepare_sa_inputs(structures: List[str], stage: str) -> List[str]:
     stage = stage.lower()
     if stage == "a":
@@ -182,15 +192,23 @@ def _resolve_vocab_path(stage: str, ckpt_path: Path, vocab_arg: Optional[str]) -
         candidates.append(Path(vocab_arg))
 
     if ckpt_path:
-        candidates.append(ckpt_path.parent / "vocab.txt")
+        ckpt_dir = ckpt_path.parent
+        candidates.append(ckpt_dir / "vocab.txt")
+        candidates.extend(_collect_vocab_files(ckpt_dir, recursive=False))
 
-    stage_defaults = {
-        "a": Path("PolyDiffusion/vocab.txt"),
-        "b": Path("PolyDiffusion/vocab_stage_bc.txt"),
-        "c": Path("PolyDiffusion/vocab_stage_bc.txt"),
+    stage_dirs: Dict[str, List[tuple[Path, bool]]] = {
+        "a": [(Path("Results/stage_a"), True)],
+        "b": [(Path("Results/stage_b"), True)],
+        "c": [(Path("Results/stage_c"), True), (Path("Results/stage_b"), True)],
     }
-    if stage in stage_defaults:
-        candidates.append(stage_defaults[stage])
+    for directory, recursive in stage_dirs.get(stage, []):
+        candidates.extend(_collect_vocab_files(directory, recursive=recursive))
+
+    repo_dirs: List[tuple[Path, bool]] = [
+        (Path("PolyDiffusion"), False),
+    ]
+    for directory, recursive in repo_dirs:
+        candidates.extend(_collect_vocab_files(directory, recursive=recursive))
 
     # Preserve order while removing duplicate string representations
     seen: set[str] = set()
@@ -241,7 +259,6 @@ def main() -> None:
     parser.add_argument("--num", default=10, type=int, help="Number of samples.")
     parser.add_argument("--steps", default=10, type=int, help="Diffusion steps.")
     parser.add_argument("--targets", default="", type=str, help="Comma separated property targets.")
-    parser.add_argument("--s_target", default=None, type=float, help="Synthesis score target.")
     parser.add_argument("--cfg", default=1.5, type=float, help="CFG scale.")
     parser.add_argument("--grad", default=0.0, type=float, help="Gradient guidance weight.")
     parser.add_argument("--temperature", default=1.0, type=float, help="Sampling temperature (<=0 for greedy decoding).")
@@ -322,7 +339,6 @@ def main() -> None:
         results = sampler.sample(
             num_samples=args.num,
             num_steps=args.steps,
-            synth_target=args.s_target,
             cfg_scale=args.cfg,
             gradient_weight=args.grad,
         )
@@ -336,7 +352,6 @@ def main() -> None:
             num_samples=args.num,
             num_steps=args.steps,
             property_targets=property_targets if stage == "c" else None,
-            synth_target=args.s_target,
             cfg_scale=args.cfg,
             gradient_weight=args.grad,
             include_properties=include_properties,

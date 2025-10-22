@@ -1,15 +1,23 @@
 # Stage C Configuration: Tg (Glass Transition Temperature) Property Training
 # This config trains a model specifically for Tg property prediction and generation
 
-vocab_path: PolyDiffusion/vocab_stage_bc.txt
+# Tokenization configuration (must match Stage B vocabulary)
+tokenization:
+  method: "atom_regex"  # Options: "character", "atom_regex", "safe"
+  vocab_path: ""  # Leave blank to auto-discover Stage B vocabulary
+
+# Backward compatibility
+vocab_path: ""  # Backward-compat override (leave blank for auto)
 model_config: PolyDiffusion/configs/model_base.yaml
 
 # IMPORTANT: Specify target property for single-property training
 target_property: Tg
 
-# Load pretrained Stage B model for transfer learning
-pretrained_checkpoint: Results/stage_b/best_model.pt
+# Load pretrained Stage B model for transfer learning (auto-detected when blank)
+pretrained_checkpoint: ""
 freeze_backbone: false  # Set to true to freeze backbone and only train heads
+stage_b_results_dir: Results/stage_b  # Override if Stage B outputs live elsewhere
+# stage_b_method: atom_regex  # Uncomment to override Stage B tokenizer if different
 
 # Results will be saved in property-specific directory
 results_dir: Results/stage_c/Tg
@@ -34,7 +42,6 @@ training:
   pin_memory: true
 
 loss:
-  lambda_syn: 0.5  # Synthesis loss weight
   lambda_prop: 1.0  # Property loss weight (can increase for stronger conditioning)
   lambda_gram: 0.1  # Grammar penalty weight
 

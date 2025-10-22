@@ -15,10 +15,6 @@ def diffusion_ce(model, outputs, x0, timesteps, mask) -> torch.Tensor:
     return model.diffusion.loss(outputs["logits"], x0, timesteps, mask)
 
 
-def synthesis_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    return nn.functional.mse_loss(pred, target)
-
-
 def property_loss(
     property_preds: Dict[str, torch.Tensor],
     targets: Dict[str, torch.Tensor],
