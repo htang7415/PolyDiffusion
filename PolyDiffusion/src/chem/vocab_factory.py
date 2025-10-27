@@ -124,7 +124,7 @@ def load_vocabulary_auto(
         has_anchors = '[Zz]' in tokens_content and '[Zr]' in tokens_content
 
         # Map method name to class
-        if method in ('PlainCharacterVocab', 'character'):
+        if method in ('PlainCharacterVocab', 'AnchorCharacterVocab', 'character'):
             VocabClass = AnchorCharacterVocab if has_anchors else PlainCharacterVocab
         elif method in ('PlainAtomVocab', 'AnchorAtomVocab', 'atom_regex'):
             VocabClass = AnchorAtomVocab if has_anchors else PlainAtomVocab

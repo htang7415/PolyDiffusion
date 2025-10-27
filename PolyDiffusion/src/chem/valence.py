@@ -17,7 +17,7 @@ def has_two_anchors(ap_smiles: str) -> bool:
     return ap_smiles.count(ANCHOR1) == 1 and ap_smiles.count(ANCHOR2) == 1
 
 
-def _cap_anchors(ap_smiles: str, cap_smiles: str = "C") -> str:
+def _cap_anchors(ap_smiles: str, cap_smiles: str = "*") -> str:
     return ap_smiles.replace(ANCHOR1, cap_smiles).replace(ANCHOR2, cap_smiles)
 
 

@@ -23,6 +23,7 @@ from PolyDiffusion.scripts.evaluate_stage import (
     compute_stage_a_metrics,
     compute_stage_b_metrics,
     compute_stage_c_metrics,
+    load_training_set,
 )
 
 try:  # pragma: no cover - optional dependency
@@ -42,6 +43,7 @@ STAGE_METRIC_KEYS = {
         "synthesizability_mean",
         "synthesizability_std",
         "uniqueness",
+        "novelty",
         "internal_diversity_mean",
     ],
     "b": [
@@ -49,6 +51,7 @@ STAGE_METRIC_KEYS = {
         "synthesizability_mean",
         "synthesizability_std",
         "uniqueness",
+        "novelty",
         "internal_diversity_mean",
         "anchor_correctness",
     ],
@@ -121,12 +124,10 @@ def _prepare_sa_inputs(structures: List[str], stage: str) -> List[str]:
             capped.append("")
         else:
             capped.append(
-                structure.replace(SHIELD1, "C")
-                .replace(SHIELD2, "C")
-                .replace("[*:1]", "C")
-                .replace("[*:2]", "C")
-                .replace("[*]", "C")
-                .replace("*", "C")
+                structure.replace(SHIELD1, "*")
+                .replace(SHIELD2, "*")
+                .replace("[*:1]", "*")
+                .replace("[*:2]", "*")
             )
     return capped
 
@@ -305,6 +306,11 @@ def main() -> None:
         choices=["labeled", "plain"],
         help="Stage B/C only: choose 'labeled' for [*:1]/[*:2] anchors (default) or 'plain' for bare '*' attachment points in outputs.",
     )
+    parser.add_argument(
+        "--training-data",
+        type=str,
+        help="Path to training data file (CSV/JSONL/GZ) for novelty metric calculation.",
+    )
     args = parser.parse_args()
 
     start_time = time.perf_counter()
@@ -392,11 +398,18 @@ def main() -> None:
     sa_structures = metrics_structures if stage == "a" else plain_structures
     sa_scores = _attach_sa_scores(sa_structures, predictions, stage)
 
+    # Load training set for novelty calculation if provided
+    training_set = None
+    if args.training_data:
+        training_data_path = Path(args.training_data)
+        field = "smiles" if stage == "a" else "ap_smiles"
+        training_set = load_training_set(training_data_path, field)
+
     # Compute stage-specific metrics from sampled structures.
     if stage == "a":
-        metrics = compute_stage_a_metrics(metrics_structures, predictions, training_set=None, stage="a")
+        metrics = compute_stage_a_metrics(metrics_structures, predictions, training_set=training_set, stage="a")
     elif stage == "b":
-        metrics = compute_stage_b_metrics(metrics_structures, predictions, training_set=None)
+        metrics = compute_stage_b_metrics(metrics_structures, predictions, training_set=training_set)
     else:
         metrics = compute_stage_c_metrics(metrics_structures, predictions, property_targets=None, target_property=None)
 

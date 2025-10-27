@@ -1,6 +1,6 @@
 # Tokenization configuration
 tokenization:
-  method: "character"  # Options: "character", "atom_regex", "safe"
+  method: "safe"  # Options: "character", "atom_regex", "safe"
   vocab_path: ""  # Leave blank to auto-build from data
 
   # Vocabulary building parameters (used when vocab_path doesn't exist)
@@ -47,9 +47,9 @@ training:
   lr: 2.0e-4
   lr_min: 1.0e-5
   weight_decay: 0.01
-  steps: 1000
-  log_interval: 1000
-  save_interval: 1000  # Save checkpoint every 250 steps
+  steps: 50000
+  log_interval: 5000
+  save_interval: 5000  # Save checkpoint every 250 steps
   max_grad_norm: 1.0
   num_workers: 32
   pin_memory: true

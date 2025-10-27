@@ -22,28 +22,28 @@ model_config: PolyDiffusion/configs/model_base.yaml
 results_dir: Results/stage_a
 
 data:
-  path: Data/Small_molecules_filtered_3.gz
+  path: Data/Small_molecules_filtered_96.gz
   format: csv
   delimiter: "\t"
   fieldnames:
     - index
     - SMILES
   has_header: false
-  limit: 1000000  # Use full dataset, or set integer to use subset
+  limit: null  # Use full dataset (null), or set integer to use subset (1000000)
   shuffle: true
   cache_in_memory: true
   seed: 42
 
 training:
-  batch_size: 256          # effective batch size (micro_batch_size * grad_accum_steps)
-  micro_batch_size: 64     # actual per-GPU batch size to fit memory
+  batch_size: 2048          # effective batch size (micro_batch_size * grad_accum_steps)
+  micro_batch_size: 256     # actual per-GPU batch size to fit memory
   grad_accum_steps: 4        # accumulate gradients to reach effective batch size
   lr: 3.0e-4
   lr_min: 1.0e-5  # Minimum LR for cosine annealing scheduler
   weight_decay: 0.02
-  steps: 1000
+  steps: 50000
   log_interval: 1000
-  save_interval: 1000  # Save checkpoint every 1000 steps
+  save_interval: 5000  # Save checkpoint every 1000 steps
   max_grad_norm: 1.0  # Gradient clipping
   num_workers: 32
   pin_memory: true

@@ -63,8 +63,8 @@ def smiles_to_mol(smiles: str) -> Optional[object]:
     if not HAS_RDKIT:
         return None
 
-    # Cap anchors with carbon for validation
-    capped = smiles.replace(ANCHOR1, "C").replace(ANCHOR2, "C")
+    # Cap anchors with wildcard for validation
+    capped = smiles.replace(ANCHOR1, "*").replace(ANCHOR2, "*")
     try:
         mol = Chem.MolFromSmiles(capped, sanitize=False)
         if mol is None:
@@ -103,7 +103,7 @@ def prepare_sa_inputs(samples: List[str], stage: str) -> List[str]:
     if stage == "a":
         return samples
     if stage == "b":
-        return [s.replace(ANCHOR1, "C").replace(ANCHOR2, "C") for s in samples]
+        return [s.replace(ANCHOR1, "*").replace(ANCHOR2, "*") for s in samples]
     return samples
 
 
@@ -443,11 +443,40 @@ def load_training_set(path: Optional[Path], field: str = "smiles") -> Set[str]:
     if path.suffix == ".csv":
         import csv
         with path.open("r") as f:
-            reader = csv.DictReader(f)
+            # Try tab delimiter first, then comma
+            first_line = f.readline()
+            f.seek(0)
+            delimiter = "\t" if "\t" in first_line else ","
+
+            reader = csv.DictReader(f, delimiter=delimiter)
             for row in reader:
-                if field in row:
-                    training_smiles.add(row[field])
-    elif path.suffix in [".jsonl", ".gz"]:
+                # Try the requested field first, then try "SMILES" as fallback
+                smiles_value = row.get(field) or row.get("SMILES") or row.get("smiles")
+                if smiles_value:
+                    training_smiles.add(smiles_value)
+    elif path.suffix == ".gz":
+        # Try to detect format from first line
+        import gzip
+        with gzip.open(path, "rt", encoding="utf-8") as f:
+            first_line = f.readline().strip()
+            f.seek(0)
+
+            # Check if it looks like JSON
+            if first_line.startswith("{"):
+                from PolyDiffusion.utils.fileio import stream_jsonl
+                for record in stream_jsonl(path):
+                    if field in record:
+                        training_smiles.add(record[field])
+            else:
+                # Assume TSV format: index\tSMILES
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) >= 2:
+                        training_smiles.add(parts[1])  # SMILES is second column
+    elif path.suffix == ".jsonl":
         from PolyDiffusion.utils.fileio import stream_jsonl
         for record in stream_jsonl(path):
             if field in record:

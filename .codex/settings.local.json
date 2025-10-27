@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod:*)",
+      "Bash(python -m PolyDiffusion.scripts.build_vocab:*)",
+      "Bash(python3:*)",
+      "Bash(~/anaconda3/bin/python:*)",
+      "Bash(~/anaconda3/bin/pip install -e PolyDiffusion/)",
+      "Bash(PYTHONPATH=/home/htang228/Machine_learning/Diffusion_model/PolyDiffusion:$PYTHONPATH ~/anaconda3/bin/python:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(cat:*)",
+      "Bash(zcat:*)",
+      "Bash(tree:*)",
+      "Bash(mv:*)",
+      "Bash(xargs ls -lh)",
+      "Bash(awk -F'\\t' '{print NF}')",
+      "Bash(awk -F',' '{print NF}')",
+      "Bash(python -c \"\nfrom PolyDiffusion.src.utils.sa_score import calculate_sa_score\n\n# Test: What SA score does simple polymer get?\ntest_cases = [\n    (''CCO'', ''ethanol - small molecule''),\n    (''C'' * 10, ''simple alkane''),\n    (''[*:1]CCC[*:2]'', ''polymer with anchors''),\n    (''CCCC'', ''capped version (anchors->C)'')\n]\n\nfor smiles, desc in test_cases:\n    score = calculate_sa_score(smiles)\n    print(f''{desc:30s} SMILES: {smiles:20s} SA_Score: {score:.3f}'')\n\")",
+      "Bash(awk:*)",
+      "Bash(xargs ls:*)",
+      "Bash(METHOD=character python -m PolyDiffusion.scripts.sample_cli:*)",
+      "Bash(METHOD=character ~/anaconda3/bin/python:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
