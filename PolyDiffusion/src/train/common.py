@@ -6,12 +6,13 @@ import logging
 from pathlib import Path
 from typing import Dict, Iterable, List, MutableMapping, Optional, Sequence, Tuple
 
+import json
 import torch
 import yaml
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 
 from ..chem import valence as valence_utils
-from ..chem.ap_smiles import ANCHOR1, ANCHOR2
+from ..chem.ap_smiles import ANCHOR1, ANCHOR2, SHIELD1, SHIELD2
 from ..chem import convert_polymer_to_ap_smiles
 from ..chem.base_vocab import BaseVocabulary
 from ..chem.vocab import AnchorSafeVocab  # Backward compat
@@ -222,6 +223,46 @@ def build_model(vocab: AnchorSafeVocab | PlainVocab, model_cfg: dict, max_seq_le
     return DiffusionTransformer(model_config, diffusion_config, max_seq_len=max_seq_len)
 
 
+def split_dataset(
+    dataset,
+    ratios: Tuple[float, float, float] = (0.8, 0.1, 0.1),
+    seed: int = 42,
+) -> Tuple:
+    """
+    Split a dataset into train/validation/test subsets using deterministic random splitting.
+
+    Args:
+        dataset: Dataset to split
+        ratios: Tuple of (train_ratio, val_ratio, test_ratio). Must sum to 1.0.
+        seed: Random seed for reproducible splits (default: 42)
+
+    Returns:
+        Tuple of (train_dataset, val_dataset, test_dataset)
+    """
+    if abs(sum(ratios) - 1.0) > 1e-6:
+        raise ValueError(f"Ratios must sum to 1.0, got {sum(ratios)}")
+
+    total_size = len(dataset)
+    train_size = int(ratios[0] * total_size)
+    val_size = int(ratios[1] * total_size)
+    test_size = total_size - train_size - val_size  # Ensure all samples are used
+
+    generator = torch.Generator().manual_seed(seed)
+    train_dataset, val_dataset, test_dataset = random_split(
+        dataset, [train_size, val_size, test_size], generator=generator
+    )
+
+    log = logging.getLogger(__name__)
+    log.info(
+        f"Split dataset: train={train_size} ({ratios[0]*100:.0f}%), "
+        f"val={val_size} ({ratios[1]*100:.0f}%), "
+        f"test={test_size} ({ratios[2]*100:.0f}%), "
+        f"total={total_size} (seed={seed})"
+    )
+
+    return train_dataset, val_dataset, test_dataset
+
+
 def build_stage_dataset(
     stage: str,
     data_cfg: dict,
@@ -357,13 +398,28 @@ def make_dataloader(
     collate_fn,
     num_workers: int = 0,
     pin_memory: Optional[bool] = None,
+    shuffle: bool = True,
 ) -> DataLoader:
+    """
+    Create a DataLoader for training or evaluation.
+
+    Args:
+        dataset: Dataset to load
+        batch_size: Batch size
+        collate_fn: Collation function
+        num_workers: Number of worker processes
+        pin_memory: Whether to use pinned memory (default: auto-detect CUDA)
+        shuffle: Whether to shuffle the data (default: True for training, False for eval)
+
+    Returns:
+        DataLoader instance
+    """
     if pin_memory is None:
         pin_memory = torch.cuda.is_available()
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=shuffle,
         collate_fn=collate_fn,
         num_workers=num_workers,
         pin_memory=pin_memory,
@@ -406,6 +462,236 @@ def save_checkpoint(
 
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(checkpoint, path)
+
+
+def compute_eval_loss_stage_a(
+    model,
+    dataloader: DataLoader,
+    device: torch.device,
+    vocab: BaseVocabulary,
+) -> Dict[str, float]:
+    """
+    Compute evaluation loss for Stage A on a given dataset split.
+
+    Args:
+        model: DiffusionTransformer model
+        dataloader: DataLoader for evaluation (validation or test)
+        device: Device to run evaluation on
+        vocab: Vocabulary
+
+    Returns:
+        Dictionary of loss components (e.g., {"total": X, "diffusion": Y})
+    """
+    from ..losses.objectives import stage_a_objective
+
+    model.eval()
+    loss_sums: Dict[str, float] = {}
+    num_batches = 0
+
+    with torch.no_grad():
+        for batch in dataloader:
+            tokens = batch["tokens"].to(device)
+            mask = batch["mask"].to(device)
+
+            timesteps = model.diffusion.sample_timesteps(tokens.size(0))
+            noisy_tokens, noise_mask = model.diffusion.q_sample(tokens, timesteps)
+
+            outputs = model(noisy_tokens, timesteps, attention_mask=mask)
+            losses = stage_a_objective(model, outputs, tokens, timesteps, noise_mask)
+
+            for name, value in losses.items():
+                loss_sums[name] = loss_sums.get(name, 0.0) + float(value.detach().cpu())
+
+            num_batches += 1
+
+    # Average losses
+    avg_losses = {name: value / num_batches for name, value in loss_sums.items()} if num_batches > 0 else {}
+    model.train()
+    return avg_losses
+
+
+def compute_eval_loss_stage_b(
+    model,
+    dataloader: DataLoader,
+    device: torch.device,
+    vocab: BaseVocabulary,
+    lambda_gram: float,
+) -> Dict[str, float]:
+    """
+    Compute evaluation loss for Stage B on a given dataset split.
+
+    Args:
+        model: DiffusionTransformer model
+        dataloader: DataLoader for evaluation (validation or test)
+        device: Device to run evaluation on
+        vocab: Vocabulary
+        lambda_gram: Grammar loss weight
+
+    Returns:
+        Dictionary of loss components (e.g., {"total": X, "diffusion": Y, "grammar": Z})
+    """
+    from ..losses.objectives import stage_b_objective
+
+    model.eval()
+    loss_sums: Dict[str, float] = {}
+    num_batches = 0
+
+    with torch.no_grad():
+        for batch in dataloader:
+            tokens = batch["tokens"].to(device)
+            mask = batch["mask"].to(device)
+            anchor_count = batch["anchor_count"].to(device)
+            valence = batch["valence"].to(device)
+
+            timesteps = model.diffusion.sample_timesteps(tokens.size(0))
+            noisy_tokens, noise_mask = model.diffusion.q_sample(tokens, timesteps)
+            anchor_mask_tokens = (tokens == vocab.token_to_id[SHIELD1]) | (tokens == vocab.token_to_id[SHIELD2])
+            if torch.any(anchor_mask_tokens):
+                noise_mask = noise_mask | anchor_mask_tokens
+                noisy_tokens = noisy_tokens.masked_fill(anchor_mask_tokens, vocab.mask_id)
+
+            outputs = model(noisy_tokens, timesteps, attention_mask=mask)
+            losses = stage_b_objective(
+                model,
+                outputs,
+                tokens,
+                timesteps,
+                noise_mask,
+                anchor_count,
+                valence,
+                lambda_gram,
+                vocab,
+            )
+
+            for name, value in losses.items():
+                loss_sums[name] = loss_sums.get(name, 0.0) + float(value.detach().cpu())
+
+            num_batches += 1
+
+    # Average losses
+    avg_losses = {name: value / num_batches for name, value in loss_sums.items()} if num_batches > 0 else {}
+    model.train()
+    return avg_losses
+
+
+def compute_eval_loss_stage_c(
+    model,
+    dataloader: DataLoader,
+    device: torch.device,
+    vocab: BaseVocabulary,
+    lambda_prop: float,
+    lambda_gram: float,
+    target_property: Optional[str] = None,
+) -> Dict[str, float]:
+    """
+    Compute evaluation loss for Stage C on a given dataset split.
+
+    Args:
+        model: DiffusionTransformer model
+        dataloader: DataLoader for evaluation (validation or test)
+        device: Device to run evaluation on
+        vocab: Vocabulary
+        lambda_prop: Property loss weight
+        lambda_gram: Grammar loss weight
+        target_property: If specified, only evaluate on this property
+
+    Returns:
+        Dictionary of loss components (e.g., {"total": X, "diffusion": Y, "properties": Z, "grammar": W})
+    """
+    from ..losses.objectives import stage_c_objective
+
+    model.eval()
+    loss_sums: Dict[str, float] = {}
+    num_batches = 0
+
+    with torch.no_grad():
+        for batch in dataloader:
+            tokens = batch["tokens"].to(device)
+            mask = batch["mask"].to(device)
+            anchor_count = batch["anchor_count"].to(device)
+            valence = batch["valence"].to(device)
+            properties = {name: tensor.to(device) for name, tensor in batch["properties"].items()}
+
+            timesteps = model.diffusion.sample_timesteps(tokens.size(0))
+            noisy_tokens, noise_mask = model.diffusion.q_sample(tokens, timesteps)
+            anchor_mask_tokens = (tokens == vocab.token_to_id[SHIELD1]) | (tokens == vocab.token_to_id[SHIELD2])
+            if torch.any(anchor_mask_tokens):
+                noise_mask = noise_mask | anchor_mask_tokens
+                noisy_tokens = noisy_tokens.masked_fill(anchor_mask_tokens, vocab.mask_id)
+
+            outputs = model(noisy_tokens, timesteps, attention_mask=mask, properties=properties)
+            losses = stage_c_objective(
+                model,
+                outputs,
+                tokens,
+                timesteps,
+                noise_mask,
+                properties,
+                anchor_count,
+                valence,
+                lambda_prop,
+                lambda_gram,
+                vocab,
+                target_property=target_property,
+            )
+
+            for name, value in losses.items():
+                loss_sums[name] = loss_sums.get(name, 0.0) + float(value.detach().cpu())
+
+            num_batches += 1
+
+    # Average losses
+    avg_losses = {name: value / num_batches for name, value in loss_sums.items()} if num_batches > 0 else {}
+    model.train()
+    return avg_losses
+
+
+def save_metrics_json(
+    path: Path,
+    final_metrics: Dict[str, Dict[str, float]],
+    best_metrics: Dict[str, Dict[str, float]],
+    best_step: int,
+    best_val_loss: float,
+) -> None:
+    """
+    Save evaluation metrics to JSON file.
+
+    Args:
+        path: Path to save JSON file
+        final_metrics: Metrics for final model (train/val/test splits)
+        best_metrics: Metrics for best model (train/val/test splits)
+        best_step: Training step where best model was saved
+        best_val_loss: Validation loss of best model
+
+    Example output:
+        {
+          "final_model": {
+            "train": {"total": 2.34, "diffusion": 2.10, ...},
+            "validation": {"total": 2.45, "diffusion": 2.18, ...},
+            "test": {"total": 2.50, "diffusion": 2.22, ...}
+          },
+          "best_model": {
+            "train": {"total": 2.20, "diffusion": 1.98, ...},
+            "validation": {"total": 2.38, "diffusion": 2.12, ...},
+            "test": {"total": 2.42, "diffusion": 2.15, ...}
+          },
+          "best_step": 12500,
+          "best_val_loss": 2.38
+        }
+    """
+    metrics_data = {
+        "final_model": final_metrics,
+        "best_model": best_metrics,
+        "best_step": best_step,
+        "best_val_loss": best_val_loss,
+    }
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(metrics_data, f, indent=2)
+
+    log = logging.getLogger(__name__)
+    log.info(f"Saved evaluation metrics to {path}")
 
 
 def _load_vocab_auto(path: Path, tokenization_config: Optional[TokenizationConfig] = None) -> BaseVocabulary:

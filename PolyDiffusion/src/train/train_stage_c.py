@@ -27,12 +27,15 @@ from .common import (
     build_model,
     build_stage_dataset,
     collate_stage_c,
+    compute_eval_loss_stage_c,
     default_device,
     load_yaml,
     make_dataloader,
     save_checkpoint,
+    save_metrics_json,
     load_checkpoint,
     load_pretrained_for_finetuning,
+    split_dataset,
 )
 
 try:  # pragma: no cover
@@ -223,14 +226,40 @@ def run_stage_c(config_path: str) -> None:
         log.warning("Training in MULTI-PROPERTY mode (all properties). Consider using 'target_property' for better results.")
         active_properties = list(model.config.property_names)
 
-    dataset = build_stage_dataset("c", cfg["data"], property_names=active_properties)
+    # Load dataset and split into train/validation/test (8:1:1)
+    full_dataset = build_stage_dataset("c", cfg["data"], property_names=active_properties)
+    train_dataset, val_dataset, test_dataset = split_dataset(
+        full_dataset,
+        ratios=(0.8, 0.1, 0.1),
+        seed=cfg["data"].get("seed", 42)
+    )
+
     train_cfg = cfg["training"]
-    dataloader = make_dataloader(
-        dataset,
+
+    # Create dataloaders: training with shuffle, validation/test without shuffle
+    train_dataloader = make_dataloader(
+        train_dataset,
         train_cfg["batch_size"],
         lambda batch: collate_stage_c(batch, vocab, active_properties),
         num_workers=train_cfg.get("num_workers", 0),
         pin_memory=train_cfg.get("pin_memory"),
+        shuffle=True,
+    )
+    val_dataloader = make_dataloader(
+        val_dataset,
+        train_cfg["batch_size"],
+        lambda batch: collate_stage_c(batch, vocab, active_properties),
+        num_workers=train_cfg.get("num_workers", 0),
+        pin_memory=train_cfg.get("pin_memory"),
+        shuffle=False,
+    )
+    test_dataloader = make_dataloader(
+        test_dataset,
+        train_cfg["batch_size"],
+        lambda batch: collate_stage_c(batch, vocab, active_properties),
+        num_workers=train_cfg.get("num_workers", 0),
+        pin_memory=train_cfg.get("pin_memory"),
+        shuffle=False,
     )
 
     optimizer = torch.optim.AdamW(
@@ -252,6 +281,7 @@ def run_stage_c(config_path: str) -> None:
 
     log_interval = train_cfg.get("log_interval", 10)
     save_interval = train_cfg.get("save_interval", 200)
+    eval_interval = train_cfg.get("eval_interval", log_interval)
     lambda_prop = cfg["loss"]["lambda_prop"]
     lambda_gram = cfg["loss"]["lambda_gram"]
 
@@ -264,8 +294,9 @@ def run_stage_c(config_path: str) -> None:
     results_dir.mkdir(parents=True, exist_ok=True)
     log.info(f"Results will be saved to {results_dir}")
 
-    # Best model tracking
-    best_loss = float('inf')
+    # Best model tracking (based on validation loss)
+    best_val_loss = float('inf')
+    best_step = 0
     best_checkpoint_path = results_dir / "best_model.pt"
 
     # Gradient clipping
@@ -274,7 +305,7 @@ def run_stage_c(config_path: str) -> None:
     model.train()
 
     # Use cycle to avoid expensive DataLoader recreation on exhaustion
-    data_iter = cycle(dataloader)
+    data_iter = cycle(train_dataloader)
     for step in range(start_step, steps):
         batch = next(data_iter)
 
@@ -326,6 +357,29 @@ def run_stage_c(config_path: str) -> None:
                 current_lr,
             )
 
+        # Validation loss evaluation
+        if step % eval_interval == 0:
+            val_losses = compute_eval_loss_stage_c(
+                model, val_dataloader, device, vocab, lambda_prop, lambda_gram, target_property
+            )
+            log.info(
+                "step=%d val_loss_total=%.4f val_loss_diff=%.4f val_loss_prop=%.4f val_loss_gram=%.4f",
+                step,
+                val_losses.get("total", float("nan")),
+                val_losses.get("diffusion", float("nan")),
+                val_losses.get("properties", float("nan")),
+                val_losses.get("grammar", float("nan")),
+            )
+
+            # Save best model based on validation loss
+            current_val_loss = val_losses.get("total", float("inf"))
+            if current_val_loss < best_val_loss:
+                best_val_loss = current_val_loss
+                best_step = step
+                metadata = {"target_property": target_property} if target_property else {}
+                save_checkpoint(best_checkpoint_path, model, optimizer, scheduler, step + 1, best_val_loss, metadata)
+                log.info(f"Saved best model with validation loss {best_val_loss:.4f} at step {step}")
+
         # Save periodic checkpoints
         if (step + 1) % save_interval == 0:
             checkpoint_path = results_dir / f"checkpoint_step_{step+1}.pt"
@@ -333,18 +387,87 @@ def run_stage_c(config_path: str) -> None:
             save_checkpoint(checkpoint_path, model, optimizer, scheduler, step + 1, losses["total"].item(), metadata)
             log.info(f"Saved checkpoint to {checkpoint_path}")
 
-        # Save best model
-        if losses["total"].item() < best_loss:
-            best_loss = losses["total"].item()
-            metadata = {"target_property": target_property} if target_property else {}
-            save_checkpoint(best_checkpoint_path, model, optimizer, scheduler, step + 1, best_loss, metadata)
-            log.info(f"Saved best model with loss {best_loss:.4f}")
-
     # Save final checkpoint
     final_checkpoint_path = results_dir / "final_model.pt"
     metadata = {"target_property": target_property} if target_property else {}
     save_checkpoint(final_checkpoint_path, model, optimizer, scheduler, steps, losses["total"].item(), metadata)
     log.info(f"Training completed. Final checkpoint saved to {final_checkpoint_path}")
+
+    # Evaluate final model on all splits
+    log.info("Evaluating final model on train/validation/test sets...")
+    final_train_metrics = compute_eval_loss_stage_c(
+        model, train_dataloader, device, vocab, lambda_prop, lambda_gram, target_property
+    )
+    final_val_metrics = compute_eval_loss_stage_c(
+        model, val_dataloader, device, vocab, lambda_prop, lambda_gram, target_property
+    )
+    final_test_metrics = compute_eval_loss_stage_c(
+        model, test_dataloader, device, vocab, lambda_prop, lambda_gram, target_property
+    )
+
+    log.info(
+        "Final model - Train: total=%.4f diff=%.4f prop=%.4f gram=%.4f | "
+        "Val: total=%.4f diff=%.4f prop=%.4f gram=%.4f | "
+        "Test: total=%.4f diff=%.4f prop=%.4f gram=%.4f",
+        final_train_metrics.get("total", float("nan")),
+        final_train_metrics.get("diffusion", float("nan")),
+        final_train_metrics.get("properties", float("nan")),
+        final_train_metrics.get("grammar", float("nan")),
+        final_val_metrics.get("total", float("nan")),
+        final_val_metrics.get("diffusion", float("nan")),
+        final_val_metrics.get("properties", float("nan")),
+        final_val_metrics.get("grammar", float("nan")),
+        final_test_metrics.get("total", float("nan")),
+        final_test_metrics.get("diffusion", float("nan")),
+        final_test_metrics.get("properties", float("nan")),
+        final_test_metrics.get("grammar", float("nan")),
+    )
+
+    # Load and evaluate best model on all splits
+    log.info("Evaluating best model on train/validation/test sets...")
+    load_checkpoint(best_checkpoint_path, model, optimizer=None, scheduler=None)
+    best_train_metrics = compute_eval_loss_stage_c(
+        model, train_dataloader, device, vocab, lambda_prop, lambda_gram, target_property
+    )
+    best_val_metrics = compute_eval_loss_stage_c(
+        model, val_dataloader, device, vocab, lambda_prop, lambda_gram, target_property
+    )
+    best_test_metrics = compute_eval_loss_stage_c(
+        model, test_dataloader, device, vocab, lambda_prop, lambda_gram, target_property
+    )
+
+    log.info(
+        "Best model (step %d) - Train: total=%.4f diff=%.4f prop=%.4f gram=%.4f | "
+        "Val: total=%.4f diff=%.4f prop=%.4f gram=%.4f | "
+        "Test: total=%.4f diff=%.4f prop=%.4f gram=%.4f",
+        best_step,
+        best_train_metrics.get("total", float("nan")),
+        best_train_metrics.get("diffusion", float("nan")),
+        best_train_metrics.get("properties", float("nan")),
+        best_train_metrics.get("grammar", float("nan")),
+        best_val_metrics.get("total", float("nan")),
+        best_val_metrics.get("diffusion", float("nan")),
+        best_val_metrics.get("properties", float("nan")),
+        best_val_metrics.get("grammar", float("nan")),
+        best_test_metrics.get("total", float("nan")),
+        best_test_metrics.get("diffusion", float("nan")),
+        best_test_metrics.get("properties", float("nan")),
+        best_test_metrics.get("grammar", float("nan")),
+    )
+
+    # Save metrics to JSON
+    final_metrics = {
+        "train": final_train_metrics,
+        "validation": final_val_metrics,
+        "test": final_test_metrics,
+    }
+    best_metrics = {
+        "train": best_train_metrics,
+        "validation": best_val_metrics,
+        "test": best_test_metrics,
+    }
+    metrics_path = results_dir / "final_metrics.json"
+    save_metrics_json(metrics_path, final_metrics, best_metrics, best_step, best_val_loss)
 
     # Legacy checkpoint path support
     if "checkpoint_path" in cfg:

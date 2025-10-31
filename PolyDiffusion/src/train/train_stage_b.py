@@ -24,12 +24,15 @@ from .common import (
     build_stage_dataset,
     build_vocab_from_dataset,
     collate_stage_b,
+    compute_eval_loss_stage_b,
     default_device,
     load_yaml,
     make_dataloader,
     save_checkpoint,
+    save_metrics_json,
     load_checkpoint,
     load_pretrained_for_finetuning,
+    split_dataset,
 )
 
 try:  # pragma: no cover
@@ -93,7 +96,14 @@ def run_stage_b(config_path: str) -> None:
     start_time = time.perf_counter()
 
     # Load dataset first
-    dataset = build_stage_dataset("b", cfg["data"])
+    full_dataset = build_stage_dataset("b", cfg["data"])
+
+    # Split into train/validation/test (8:1:1)
+    train_dataset, val_dataset, test_dataset = split_dataset(
+        full_dataset,
+        ratios=(0.8, 0.1, 0.1),
+        seed=cfg["data"].get("seed", 42)
+    )
 
     # Load tokenization configuration
     tok_config = load_tokenization_config(cfg)
@@ -119,7 +129,7 @@ def run_stage_b(config_path: str) -> None:
             vocab_path = results_dir / f"vocab_{tok_config.method}_stage_b.txt"
 
         vocab = build_vocab_from_dataset(
-            dataset,
+            full_dataset,
             "b",
             tok_config,
             limit=tok_config.vocab_limit_samples
@@ -268,12 +278,30 @@ def run_stage_b(config_path: str) -> None:
             micro_batch_size,
             grad_accum_steps,
         )
-    dataloader = make_dataloader(
-        dataset,
+    # Create dataloaders: training with shuffle, validation/test without shuffle
+    train_dataloader = make_dataloader(
+        train_dataset,
         micro_batch_size,
         lambda batch: collate_stage_b(batch, vocab),
         num_workers=train_cfg.get("num_workers", 0),
         pin_memory=train_cfg.get("pin_memory"),
+        shuffle=True,
+    )
+    val_dataloader = make_dataloader(
+        val_dataset,
+        micro_batch_size,
+        lambda batch: collate_stage_b(batch, vocab),
+        num_workers=train_cfg.get("num_workers", 0),
+        pin_memory=train_cfg.get("pin_memory"),
+        shuffle=False,
+    )
+    test_dataloader = make_dataloader(
+        test_dataset,
+        micro_batch_size,
+        lambda batch: collate_stage_b(batch, vocab),
+        num_workers=train_cfg.get("num_workers", 0),
+        pin_memory=train_cfg.get("pin_memory"),
+        shuffle=False,
     )
 
     optimizer = torch.optim.AdamW(
@@ -297,6 +325,7 @@ def run_stage_b(config_path: str) -> None:
 
     log_interval = train_cfg.get("log_interval", 10)
     save_interval = train_cfg.get("save_interval", 500)
+    eval_interval = train_cfg.get("eval_interval", log_interval)
     lambda_gram = cfg["loss"].get("lambda_gram", 0.1)
 
     # Setup Results directory
@@ -309,8 +338,9 @@ def run_stage_b(config_path: str) -> None:
     except OSError as exc:
         log.warning("Failed to write vocabulary copy to results directory: %s", exc)
 
-    # Best model tracking
-    best_loss = float('inf')
+    # Best model tracking (based on validation loss)
+    best_val_loss = float('inf')
+    best_step = 0
     best_checkpoint_path = results_dir / "best_model.pt"
 
     # Gradient clipping / AMP configuration
@@ -336,7 +366,7 @@ def run_stage_b(config_path: str) -> None:
     model.train()
 
     # Use cycle to avoid expensive DataLoader recreation on exhaustion
-    data_iter = cycle(dataloader)
+    data_iter = cycle(train_dataloader)
     last_logged_losses: dict[str, float] | None = None
     for step in range(start_step, steps):
         optimizer.zero_grad(set_to_none=True)
@@ -404,6 +434,25 @@ def run_stage_b(config_path: str) -> None:
                 current_lr,
             )
 
+        # Validation loss evaluation
+        if step % eval_interval == 0:
+            val_losses = compute_eval_loss_stage_b(model, val_dataloader, device, vocab, lambda_gram)
+            log.info(
+                "step=%d val_loss_total=%.4f val_loss_diff=%.4f val_loss_gram=%.4f",
+                step,
+                val_losses.get("total", float("nan")),
+                val_losses.get("diffusion", float("nan")),
+                val_losses.get("grammar", float("nan")),
+            )
+
+            # Save best model based on validation loss
+            current_val_loss = val_losses.get("total", float("inf"))
+            if current_val_loss < best_val_loss:
+                best_val_loss = current_val_loss
+                best_step = step
+                save_checkpoint(best_checkpoint_path, model, optimizer, scheduler, step + 1, best_val_loss)
+                log.info(f"Saved best model with validation loss {best_val_loss:.4f} at step {step}")
+
         # Save periodic checkpoints
         if (step + 1) % save_interval == 0:
             checkpoint_path = results_dir / f"checkpoint_step_{step+1}.pt"
@@ -417,18 +466,65 @@ def run_stage_b(config_path: str) -> None:
             )
             log.info(f"Saved checkpoint to {checkpoint_path}")
 
-        # Save best model
-        current_total = loss_values.get("total")
-        if current_total is not None and current_total < best_loss:
-            best_loss = current_total
-            save_checkpoint(best_checkpoint_path, model, optimizer, scheduler, step + 1, best_loss)
-            log.info(f"Saved best model with loss {best_loss:.4f}")
-
     # Save final checkpoint
     final_checkpoint_path = results_dir / "final_model.pt"
     final_loss = last_logged_losses["total"] if last_logged_losses is not None else 0.0
     save_checkpoint(final_checkpoint_path, model, optimizer, scheduler, steps, final_loss)
     log.info(f"Training completed. Final checkpoint saved to {final_checkpoint_path}")
+
+    # Evaluate final model on all splits
+    log.info("Evaluating final model on train/validation/test sets...")
+    final_train_metrics = compute_eval_loss_stage_b(model, train_dataloader, device, vocab, lambda_gram)
+    final_val_metrics = compute_eval_loss_stage_b(model, val_dataloader, device, vocab, lambda_gram)
+    final_test_metrics = compute_eval_loss_stage_b(model, test_dataloader, device, vocab, lambda_gram)
+
+    log.info(
+        "Final model - Train: total=%.4f diff=%.4f gram=%.4f | Val: total=%.4f diff=%.4f gram=%.4f | Test: total=%.4f diff=%.4f gram=%.4f",
+        final_train_metrics.get("total", float("nan")),
+        final_train_metrics.get("diffusion", float("nan")),
+        final_train_metrics.get("grammar", float("nan")),
+        final_val_metrics.get("total", float("nan")),
+        final_val_metrics.get("diffusion", float("nan")),
+        final_val_metrics.get("grammar", float("nan")),
+        final_test_metrics.get("total", float("nan")),
+        final_test_metrics.get("diffusion", float("nan")),
+        final_test_metrics.get("grammar", float("nan")),
+    )
+
+    # Load and evaluate best model on all splits
+    log.info("Evaluating best model on train/validation/test sets...")
+    load_checkpoint(best_checkpoint_path, model, optimizer=None, scheduler=None)
+    best_train_metrics = compute_eval_loss_stage_b(model, train_dataloader, device, vocab, lambda_gram)
+    best_val_metrics = compute_eval_loss_stage_b(model, val_dataloader, device, vocab, lambda_gram)
+    best_test_metrics = compute_eval_loss_stage_b(model, test_dataloader, device, vocab, lambda_gram)
+
+    log.info(
+        "Best model (step %d) - Train: total=%.4f diff=%.4f gram=%.4f | Val: total=%.4f diff=%.4f gram=%.4f | Test: total=%.4f diff=%.4f gram=%.4f",
+        best_step,
+        best_train_metrics.get("total", float("nan")),
+        best_train_metrics.get("diffusion", float("nan")),
+        best_train_metrics.get("grammar", float("nan")),
+        best_val_metrics.get("total", float("nan")),
+        best_val_metrics.get("diffusion", float("nan")),
+        best_val_metrics.get("grammar", float("nan")),
+        best_test_metrics.get("total", float("nan")),
+        best_test_metrics.get("diffusion", float("nan")),
+        best_test_metrics.get("grammar", float("nan")),
+    )
+
+    # Save metrics to JSON
+    final_metrics = {
+        "train": final_train_metrics,
+        "validation": final_val_metrics,
+        "test": final_test_metrics,
+    }
+    best_metrics = {
+        "train": best_train_metrics,
+        "validation": best_val_metrics,
+        "test": best_test_metrics,
+    }
+    metrics_path = results_dir / "final_metrics.json"
+    save_metrics_json(metrics_path, final_metrics, best_metrics, best_step, best_val_loss)
 
     # Legacy checkpoint path support
     if "checkpoint_path" in cfg:

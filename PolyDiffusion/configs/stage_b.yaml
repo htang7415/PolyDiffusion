@@ -1,6 +1,6 @@
 # Tokenization configuration
 tokenization:
-  method: "safe"  # Options: "character", "atom_regex", "safe"
+  method: "character"  # Options: "character", "atom_regex", "safe"
   vocab_path: ""  # Leave blank to auto-build from data
 
   # Vocabulary building parameters (used when vocab_path doesn't exist)
@@ -27,11 +27,11 @@ initialization:
   reuse_output_head: true       # copy decoder logits for overlapping tokens
 
 # Results directory for checkpoints
-results_dir: Results/stage_b
+results_dir: Results/stage_b/SMiPoly
 stage_a_results_dir: Results/stage_a  # Override if Stage A outputs live elsewhere
 
 data:
-  path: Data/PI1M_filtered.csv
+  path: Data/SMiPoly_polymers.gz
   format: csv
   delimiter: "\t"
   has_header: true
@@ -41,15 +41,15 @@ data:
   seed: 42
 
 training:
-  batch_size: 256          # effective batch size (micro_batch_size * grad_accum_steps)
-  micro_batch_size: 64     # per-device batch size to control GPU memory
+  batch_size: 1024          # effective batch size (micro_batch_size * grad_accum_steps)
+  micro_batch_size: 256     # per-device batch size to control GPU memory
   grad_accum_steps: 4      # accumulate gradients to reach effective batch size
   lr: 2.0e-4
   lr_min: 1.0e-5
   weight_decay: 0.01
-  steps: 50000
-  log_interval: 5000
-  save_interval: 5000  # Save checkpoint every 250 steps
+  steps: 30000
+  log_interval: 500
+  save_interval: 5000
   max_grad_norm: 1.0
   num_workers: 32
   pin_memory: true
