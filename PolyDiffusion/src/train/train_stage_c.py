@@ -1,6 +1,13 @@
-"""Stage C training: property-guided fine-tuning.
+"""Stage C training: property-guided fine-tuning for polymers.
 
-IMPORTANT: For best results, train separate models for each property (Tg, Tm, Td, Eg, chi).
+This stage fine-tunes a pretrained Stage B (polymer) model to generate polymers
+with specific target properties (Tg, Tm, Td, Eg, chi).
+
+WORKFLOW:
+  1. Stage B: Train polymer generation from scratch (no small molecules)
+  2. Stage C: Fine-tune Stage B model with property conditioning
+
+IMPORTANT: For best results, train separate models for each property.
 Use the 'target_property' config field to specify which property to train on.
 """
 

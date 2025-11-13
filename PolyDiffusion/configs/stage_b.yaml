@@ -1,62 +1,301 @@
-# Tokenization configuration
-tokenization:
-  method: "character"  # Options: "character", "atom_regex", "safe"
-  vocab_path: ""  # Leave blank to auto-build from data
+# ============================================================================
+# Stage B: Polymer Generation Training Configuration (From Scratch)
+# ============================================================================
+#
+# GOAL: Compare three tokenization methods for polymer generation from scratch
+#
+# Tokenization Methods:
+#   1. character: Character-level tokenization (~42 tokens)
+#      - Pros: Simple, small vocab, proven effective (5.8% baseline validity)
+#      - Cons: Splits multi-character atoms (Cl→C+l, Br→B+r)
+#      - Use case: Quick experiments, baseline comparison
+#
+#   2. atom_regex: Atom-level regex tokenization (~47 tokens with filtering)
+#      - Pros: Chemically meaningful, preserves atoms (Cl stays Cl)
+#      - Cons: Baseline validity lower (2.8%), but should improve with optimization
+#      - Use case: Recommended for production (chemistry-aware)
+#
+#   3. safe: Fragment-based SAFE tokenization (~300-500 tokens with AGGRESSIVE filtering)
+#      - Pros: Captures molecular fragments, potentially highest validity
+#      - Cons: Larger vocab, requires RDKit, needs aggressive filtering
+#      - Use case: Maximum validity when computational resources available
+#      - IMPORTANT: REQUIRES min_freq >= 10 and max_size <= 500 (see notes below)
+#
+# Dataset: SMiPoly_polymers_filtered.gz (10.8M polymers, rare tokens removed)
+#   - Filtered to remove: isotopes ([11C], [14C]), charges ([N+], [O-]),
+#     stereochemistry ([C@H], [C@@H])
+#   - All polymers have exactly 2 attachment points (*)
+#
+# Training Strategy: From scratch (no small molecule pretraining)
+#   - Stage A (small molecules) is NOT used
+#   - Stage C (property-guided) will use Stage B checkpoints as initialization
+#
+# Architecture: 12-layer transformer, 768 hidden dim, 50 diffusion steps
+#
+# TO USE THIS CONFIG:
+#   1. Change 'method' under tokenization to: character | atom_regex | safe
+#   2. Change 'results_dir' to match tokenization method
+#   3. For SAFE: Set min_freq=10 and max_size=500 (see SAFE notes section below)
+#   4. Run: python -m PolyDiffusion.src.train.train_stage_b --config <this file>
+#
+# ============================================================================
 
-  # Vocabulary building parameters (used when vocab_path doesn't exist)
+# ============================================================================
+# TOKENIZATION CONFIGURATION
+# ============================================================================
+# Switch between tokenization methods by changing 'method' below
+# ============================================================================
+
+tokenization:
+  method: "character"  # CHANGE THIS: character | atom_regex | safe
+
+  vocab_path: ""  # Leave empty to build vocab from scratch
+                  # Or provide path to existing vocab file
+
+  # Vocabulary building parameters (used when vocab_path is empty)
   build:
-    min_freq: 1
-    max_size: null
-    vocab_limit_samples: null
+    min_freq: 5  # Filter tokens appearing < min_freq times
+                 # Reduces noise by removing ultra-rare tokens
+                 #
+                 # For character/atom_regex:
+                 #   min_freq=1  → ~50-100 tokens (includes rare atoms/patterns)
+                 #   min_freq=5  → ~40-50 tokens (RECOMMENDED - cleaner vocab)
+                 #   min_freq=10 → ~35-45 tokens (very conservative)
+                 #
+                 # For SAFE (CRITICAL - prevents vocabulary explosion):
+                 #   min_freq=5  → ~300-500 tokens (still large)
+                 #   min_freq=10 → ~100-150 tokens (RECOMMENDED for SAFE)
+                 #   min_freq=20 → ~50-80 tokens (very conservative)
+                 #
+                 # Analysis shows: 82.8% of SAFE fragments appear only once
+                 # Without filtering, SAFE creates 7,000-10,000+ tokens!
+
+    max_size: 1000  # Maximum vocabulary size (null = unlimited)
+                    #
+                    # For character/atom_regex: null is fine (vocab naturally small)
+                    # For SAFE: Set to 500 to cap vocabulary size (CRITICAL!)
+                    #
+                    # SAFE recommendations:
+                    #   max_size=500  → Good balance
+                    #   max_size=300  → More conservative
+                    #   max_size=1000 → Larger vocab, slower training
+
+    vocab_limit_samples: null  # Limit samples for vocab building (null = use all)
+                               # Set to 50000 for faster vocab building during testing
+                               # Use null for full training (builds from all 10.8M samples)
 
   # SAFE-specific parameters (only used if method is "safe")
   safe:
-    fragment_type: "brics"
-    min_fragment_size: 1
+    fragment_type: "brics"  # Fragmentation algorithm (currently only BRICS supported)
+    min_fragment_size: 1    # Minimum atoms per fragment
 
-# Backward compatibility: old configs without tokenization section default to character
-vocab_path: ""  # Leave blank to auto-build from data
+# Backward compatibility with older configs
+vocab_path: ""
+
+# ============================================================================
+# MODEL ARCHITECTURE CONFIGURATION
+# ============================================================================
+
 model_config: PolyDiffusion/configs/model_base.yaml
 
-initialization:
-  mode: scratch  # options: stage_a, scratch
-  checkpoint: ""  # Stage A checkpoint (auto-detected when blank)
-  vocab_path: ""   # Stage A vocabulary for weight remapping (auto-detected when blank)
-  freeze_backbone: false        # true = freeze transformer backbone, train heads only
-  reuse_token_embeddings: true  # copy shared tokens from Stage A embedding matrix
-  reuse_output_head: true       # copy decoder logits for overlapping tokens
+# ============================================================================
+# DIFFUSION HYPERPARAMETERS
+# ============================================================================
+# These parameters are moved here from model_base.yaml to make them easier
+# to tune across experiments. They control the noise schedule during training.
+# ============================================================================
 
-# Results directory for checkpoints
-results_dir: Results/stage_b/SMiPoly
-stage_a_results_dir: Results/stage_a  # Override if Stage A outputs live elsewhere
+diffusion:
+  max_noise: 0.25  # Maximum noise level (default was 0.4)
+                   # Lower noise = easier denoising = better validity
+                   # Higher noise = harder task = model learns more robust features
+                   #
+                   # Recommendations:
+                   #   0.2-0.25: RECOMMENDED for high validity (easier denoising)
+                   #   0.3:      Balanced (moderate difficulty)
+                   #   0.4:      Higher diversity but lower validity (harder task)
+                   #
+                   # Analysis: Reducing from 0.4 → 0.25 expected to improve
+                   # validity by 10-15% by making reconstruction easier
+
+  min_noise: 0.02  # Minimum noise level (default was 0.05)
+                   # Keep low to preserve signal at early timesteps
+                   # Typically doesn't need tuning
+
+# ============================================================================
+# TRAINING DATA CONFIGURATION
+# ============================================================================
 
 data:
-  path: Data/SMiPoly_polymers.gz
-  format: csv
-  delimiter: "\t"
-  has_header: true
-  limit: null
-  shuffle: true
-  cache_in_memory: true
-  seed: 42
+  path: Data/SMiPoly_polymers_filtered.gz  # Filtered dataset (10.8M polymers)
+                                           # Created by filter_polymer_dataset.py
+                                           # Removed: isotopes, charges, stereochemistry
+                                           # All polymers have exactly 2 attachment points
+
+  format: csv         # File format
+  delimiter: "\t"     # Tab-separated
+  has_header: true    # First line is "SMILES"
+
+  limit: null         # Limit number of samples (null = use all 10.8M)
+                      # Set to 10000 for quick testing/debugging
+
+  shuffle: true       # Shuffle dataset before training
+  cache_in_memory: true  # Load entire dataset into RAM for faster training
+                         # Requires ~2-3GB RAM for 10.8M samples
+                         # Set to false if memory is limited
+
+  seed: 42            # Random seed for reproducibility
+
+# ============================================================================
+# TRAINING HYPERPARAMETERS
+# ============================================================================
 
 training:
-  batch_size: 1024          # effective batch size (micro_batch_size * grad_accum_steps)
-  micro_batch_size: 256     # per-device batch size to control GPU memory
-  grad_accum_steps: 4      # accumulate gradients to reach effective batch size
-  lr: 2.0e-4
-  lr_min: 1.0e-5
-  weight_decay: 0.01
-  steps: 30000
-  log_interval: 500
-  save_interval: 5000
-  max_grad_norm: 1.0
-  num_workers: 32
-  pin_memory: true
-  use_amp: true
+  # Batch size configuration
+  batch_size: 1024         # Effective batch size
+  micro_batch_size: 256    # Actual batch size per GPU (controls memory usage)
+  grad_accum_steps: 4      # Gradient accumulation steps (batch_size / micro_batch_size)
+                           # Effective batch = micro_batch_size × grad_accum_steps × num_gpus
+
+  # Learning rate schedule
+  lr: 3.0e-4              # Peak learning rate (increased from 2e-4)
+                          # Higher lr can speed up convergence
+                          # Range: 2e-4 to 5e-4 typically works well
+
+  lr_min: 1.0e-6          # Minimum learning rate for cosine annealing
+                          # Scheduler gradually reduces lr from lr → lr_min over training
+
+  lr_warmup_steps: 5000   # NEW: Learning rate warmup steps
+                          # Gradually increase lr from 0 → lr over first 5k steps
+                          # Helps stabilize training at the start
+                          # Recommended: 5000-10000 steps for large models
+
+  weight_decay: 0.01      # L2 regularization weight
+                          # Prevents overfitting
+
+  # Training duration
+  steps: 100000           # Total training steps (INCREASED from 30k)
+                          #
+                          # 100k steps × 1024 batch = 102.4M samples seen
+                          # Dataset: 10.8M polymers
+                          # Epochs: 102.4M / 10.8M ≈ 9.5 epochs
+                          #
+                          # Recommendations based on dataset size:
+                          #   50k steps:  ~5 epochs (quick iteration)
+                          #   100k steps: ~10 epochs (RECOMMENDED for full training)
+                          #   150k steps: ~14 epochs (thorough training)
+                          #
+                          # Analysis: 30k steps (baseline) was only ~3 epochs
+                          # Increasing to 100k expected to improve validity 20-40%
+
+  # Logging and checkpointing
+  log_interval: 500       # Log training metrics every 500 steps
+
+  eval_interval: 2500     # Evaluate on validation set every 2500 steps
+                          # Useful for monitoring overfitting and selecting best model
+
+  save_interval: 5000     # Save checkpoint every 5000 steps
+                          # Allows resuming training if interrupted
+
+  # Optimization settings
+  max_grad_norm: 1.0      # Gradient clipping threshold
+                          # Prevents gradient explosion
+                          # Clips gradients with norm > 1.0
+
+  num_workers: 32         # Number of data loading workers
+                          # Adjust based on CPU cores available
+
+  pin_memory: true        # Pin memory for faster GPU transfer
+                          # Set to false if running on CPU
+
+  use_amp: true           # Automatic Mixed Precision (FP16) training
+                          # Reduces memory usage and speeds up training
+                          # Requires GPU with tensor cores (V100, A100, RTX 20xx+)
+
+# ============================================================================
+# LOSS FUNCTION CONFIGURATION
+# ============================================================================
 
 loss:
-  lambda_gram: 0.1
+  lambda_gram: 0.5  # Grammar loss weight (INCREASED from 0.1)
+                    # Controls anchor correctness and chemical valence validity
+                    #
+                    # Grammar loss has two components:
+                    #   1. Anchor supervision: Forces model to predict [Zz] and [Zr] correctly
+                    #   2. Grammar head: Binary classification for "has 2 anchors + valid valence"
+                    #
+                    # Baseline (lambda_gram=0.1): grammar_loss ≈ 0.00004 (very low!)
+                    # This indicates the grammar signal is too weak
+                    #
+                    # Recommendations:
+                    #   0.3-0.5:  RECOMMENDED (stronger chemical constraints)
+                    #   0.5-0.8:  Very strong constraints (maximum validity)
+                    #   0.8-1.0:  Extremely strict (may reduce diversity)
+                    #
+                    # Trade-off: Higher lambda_gram = more valid but potentially less diverse
+                    # Analysis: Increasing from 0.1 → 0.5 expected to improve validity 10-20%
 
-# Optional: Resume from checkpoint if training interrupted
-# resume_checkpoint: Results/stage_b/checkpoint_step_250.pt
+# ============================================================================
+# RESULTS DIRECTORY
+# ============================================================================
+# Change this directory based on tokenization method for organization
+# ============================================================================
+
+results_dir: Results/stage_b/character  # CHANGE THIS based on tokenization method:
+                                        #   - Results/stage_b/character
+                                        #   - Results/stage_b/atom_regex
+                                        #   - Results/stage_b/safe
+
+# ============================================================================
+# OPTIONAL: RESUME TRAINING
+# ============================================================================
+# Uncomment and set path to resume from a previous checkpoint
+# ============================================================================
+
+# resume_checkpoint: Results/stage_b/character/checkpoint_step_50000.pt
+
+# ============================================================================
+# SAFE TOKENIZATION SPECIFIC NOTES
+# ============================================================================
+#
+# CRITICAL: When using method="safe", AGGRESSIVE filtering is REQUIRED
+#           to prevent vocabulary explosion (7,000-10,000+ tokens without filtering)
+#
+# ROOT CAUSE:
+#   - SAFE was designed for small molecules (common fragments reappear frequently)
+#   - Polymers are unique sequences (fragments rarely repeat)
+#   - Analysis of 10k polymers shows:
+#     * 7,077 unique SAFE fragments
+#     * 82.8% of fragments appear only once
+#     * Without filtering → 7,000-10,000+ vocabulary tokens!
+#
+# REQUIRED SETTINGS FOR SAFE:
+#
+#   tokenization:
+#     method: "safe"
+#     build:
+#       min_freq: 10      # Keep only fragments appearing 10+ times
+#       max_size: 500     # Cap vocabulary at 500 tokens
+#
+# EXPECTED VOCAB SIZES WITH FILTERING:
+#   min_freq=5,  max_size=500  →  ~300 tokens
+#   min_freq=10, max_size=500  →  ~100 tokens (RECOMMENDED)
+#   min_freq=10, max_size=1000 →  ~100 tokens (max_size has little effect)
+#
+# RECOMMENDATION:
+#   Start with min_freq=10 and max_size=500 for SAFE tokenization
+#   If vocabulary is still too large or training is slow, increase min_freq to 20
+#
+# WHY SAFE MIGHT NOT WORK WELL FOR POLYMERS:
+#   - Fragment-based tokenization assumes reusable building blocks
+#   - Polymers are unique sequences, not combinations of common fragments
+#   - Even with filtering, SAFE vocab (100-500 tokens) is 2-10× larger than
+#     character/atom_regex (40-50 tokens)
+#   - Larger vocab → larger embedding matrix → slower training, more GPU memory
+#   - Consider skipping SAFE if resources are limited
+#
+# ALTERNATIVE:
+#   Focus comparison on character vs atom_regex only
+#   Both have compact vocabularies (40-50 tokens) and are well-suited for polymers
+#
+# ============================================================================

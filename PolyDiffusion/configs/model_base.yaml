@@ -1,17 +1,38 @@
-d_model: 768
-n_layers: 12
-n_heads: 12
-dropout: 0.1
-diffusion_steps: 50
-schedule: cosine
-min_noise: 0.05
-max_noise: 0.4
-cfg_dropout: 0.2
-use_flow_matching: false
-self_conditioning: true
+# ============================================================================
+# Model Architecture Configuration
+# ============================================================================
+# This file defines the base transformer architecture used for polymer generation.
+# It is shared across Stage B (polymer generation) and Stage C (property-guided).
+#
+# NOTE: Diffusion noise parameters (max_noise, min_noise) have been moved to
+#       stage_b.yaml as hyperparameters to make them easier to tune across experiments.
+# ============================================================================
+
+# Transformer architecture
+d_model: 768        # Hidden dimension size
+n_layers: 12        # Number of transformer layers
+n_heads: 12         # Number of attention heads (d_model / n_heads = 64 dim per head)
+dropout: 0.1        # Dropout rate for regularization
+
+# Diffusion configuration
+diffusion_steps: 50  # Number of diffusion timesteps for forward/reverse process
+schedule: cosine     # Noise schedule: cosine | linear
+                     # Cosine schedule is typically better for generation quality
+
+# Classifier-free guidance
+cfg_dropout: 0.2     # Probability of dropping conditioning during training
+                     # Enables classifier-free guidance at sampling time
+                     # Higher dropout = stronger CFG effect possible
+
+# Advanced options
+use_flow_matching: false   # Use flow matching instead of diffusion (experimental)
+self_conditioning: true    # Use self-conditioning during diffusion
+                           # Model can condition on its own previous predictions
+
+# Property names for Stage C (property-guided generation)
 property_names:
-  - Tg
-  - Tm
-  - Td
-  - Eg
-  - chi
+  - Tg   # Glass transition temperature
+  - Tm   # Melting temperature
+  - Td   # Decomposition temperature
+  - Eg   # Band gap energy
+  - chi  # Flory-Huggins parameter
