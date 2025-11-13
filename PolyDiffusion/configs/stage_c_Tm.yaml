@@ -13,6 +13,8 @@ pretrained_checkpoint: ""
 freeze_backbone: false
 stage_b_results_dir: Results/stage_b  # Override if Stage B outputs live elsewhere
 # stage_b_method: atom_regex  # Uncomment to override Stage B tokenizer if different
+
+# NOTE: Tokenization method is automatically appended at runtime (e.g., Results/stage_c/Tm/atom_regex)
 results_dir: Results/stage_c/Tm
 
 data:

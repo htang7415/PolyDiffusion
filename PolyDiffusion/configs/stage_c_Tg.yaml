@@ -20,6 +20,8 @@ stage_b_results_dir: Results/stage_b  # Override if Stage B outputs live elsewhe
 # stage_b_method: atom_regex  # Uncomment to override Stage B tokenizer if different
 
 # Results will be saved in property-specific directory
+# NOTE: The tokenization method is automatically appended at runtime
+# Example: Results/stage_c/Tg → Results/stage_c/Tg/atom_regex (if method=atom_regex)
 results_dir: Results/stage_c/Tg
 
 data:

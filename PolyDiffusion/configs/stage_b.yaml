@@ -34,9 +34,10 @@
 #
 # TO USE THIS CONFIG:
 #   1. Change 'method' under tokenization to: character | atom_regex | safe
-#   2. Change 'results_dir' to match tokenization method
-#   3. For SAFE: Set min_freq=10 and max_size=500 (see SAFE notes section below)
-#   4. Run: python -m PolyDiffusion.src.train.train_stage_b --config <this file>
+#   2. For SAFE: Set min_freq=10 and max_size=500 (see SAFE notes section below)
+#   3. Run: python -m PolyDiffusion.src.train.train_stage_b --config <this file>
+#
+# NOTE: results_dir automatically updates based on tokenization method - no manual change needed!
 #
 # ============================================================================
 
@@ -174,7 +175,7 @@ training:
                           # Prevents overfitting
 
   # Training duration
-  steps: 100000           # Total training steps (INCREASED from 30k)
+  steps: 50000           # Total training steps (INCREASED from 30k)
                           #
                           # 100k steps × 1024 batch = 102.4M samples seen
                           # Dataset: 10.8M polymers
@@ -191,7 +192,7 @@ training:
   # Logging and checkpointing
   log_interval: 500       # Log training metrics every 500 steps
 
-  eval_interval: 2500     # Evaluate on validation set every 2500 steps
+  eval_interval: 500      # Evaluate on validation set every 2500 steps
                           # Useful for monitoring overfitting and selecting best model
 
   save_interval: 5000     # Save checkpoint every 5000 steps
@@ -238,13 +239,16 @@ loss:
 # ============================================================================
 # RESULTS DIRECTORY
 # ============================================================================
-# Change this directory based on tokenization method for organization
+# The tokenization method is automatically appended to this path at runtime.
+# For example: Results/stage_b → Results/stage_b/character (if method=character)
 # ============================================================================
 
-results_dir: Results/stage_b/character  # CHANGE THIS based on tokenization method:
-                                        #   - Results/stage_b/character
-                                        #   - Results/stage_b/atom_regex
-                                        #   - Results/stage_b/safe
+results_dir: Results/stage_b  # Base directory for results
+                              # The training script automatically appends the tokenization
+                              # method, creating subdirectories like:
+                              #   - Results/stage_b/character
+                              #   - Results/stage_b/atom_regex
+                              #   - Results/stage_b/safe
 
 # ============================================================================
 # OPTIONAL: RESUME TRAINING
