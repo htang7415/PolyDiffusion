@@ -13,7 +13,7 @@ from typing import Dict, List, Optional
 
 import torch
 
-from PolyDiffusion.chem.ap_smiles import SHIELD1, SHIELD2, convert_polymer_to_ap_smiles
+from PolyDiffusion.chem.ap_smiles import ANCHOR1, ANCHOR2, convert_polymer_to_ap_smiles
 from PolyDiffusion.chem.base_vocab import BaseVocabulary
 from PolyDiffusion.chem.vocab_factory import load_vocabulary_auto
 from PolyDiffusion.sampling.sampler import GuidedSampler, PlainSampler, SamplerConfig
@@ -115,6 +115,7 @@ def _collect_vocab_files(root: Path, recursive: bool = False) -> List[Path]:
 
 
 def _prepare_sa_inputs(structures: List[str], stage: str) -> List[str]:
+    """Prepare structures for SA score calculation by capping anchors with wildcards."""
     stage = stage.lower()
     if stage == "a":
         return [s or "" for s in structures]
@@ -123,11 +124,10 @@ def _prepare_sa_inputs(structures: List[str], stage: str) -> List[str]:
         if not structure:
             capped.append("")
         else:
+            # Cap anchors with wildcards for SA score calculation
             capped.append(
-                structure.replace(SHIELD1, "*")
-                .replace(SHIELD2, "*")
-                .replace("[*:1]", "*")
-                .replace("[*:2]", "*")
+                structure.replace(ANCHOR1, "*")
+                .replace(ANCHOR2, "*")
             )
     return capped
 
@@ -263,7 +263,7 @@ def _load_stage_vocab(stage: str, vocab_path: Path) -> BaseVocabulary:
         )
     if stage_lower in {"b", "c"} and not has_anchors:
         raise ValueError(
-            "Loaded vocabulary is missing the [Zz]/[Zr] anchor tokens required for stage B/C sampling. "
+            "Loaded vocabulary is missing the [*:1]/[*:2] anchor tokens required for stage B/C sampling. "
             "Provide a polymer vocabulary generated for those stages."
         )
     return vocab

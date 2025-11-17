@@ -14,7 +14,7 @@ from typing import Callable, Optional
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from ..chem.ap_smiles import SHIELD1, SHIELD2
+from ..chem.ap_smiles import ANCHOR1, ANCHOR2
 from ..chem.vocab_config import load_tokenization_config
 from ..chem.vocab_factory import load_vocabulary_auto
 from ..losses.objectives import stage_b_objective
@@ -88,7 +88,7 @@ def _find_stage_checkpoint(base_dir: Path, method: str) -> Optional[Path]:
     return None
 
 
-def run_stage_b(config_path: str) -> None:
+def run_stage_b(config_path: str, tokenization_method: Optional[str] = None) -> None:
     cfg = load_yaml(Path(config_path))
     configure_logging()
     log = logging.getLogger(__name__)
@@ -104,6 +104,13 @@ def run_stage_b(config_path: str) -> None:
         ratios=(0.8, 0.1, 0.1),
         seed=cfg["data"].get("seed", 42)
     )
+
+    # Override tokenization method if provided via CLI
+    if tokenization_method is not None:
+        if "tokenization" not in cfg:
+            cfg["tokenization"] = {}
+        cfg["tokenization"]["method"] = tokenization_method
+        log.info(f"Overriding tokenization method from CLI: {tokenization_method}")
 
     # Load tokenization configuration
     tok_config = load_tokenization_config(cfg)
@@ -382,7 +389,7 @@ def run_stage_b(config_path: str) -> None:
 
             timesteps = model.diffusion.sample_timesteps(tokens.size(0))
             noisy_tokens, noise_mask = model.diffusion.q_sample(tokens, timesteps)
-            anchor_mask_tokens = (tokens == vocab.token_to_id[SHIELD1]) | (tokens == vocab.token_to_id[SHIELD2])
+            anchor_mask_tokens = (tokens == vocab.token_to_id[ANCHOR1]) | (tokens == vocab.token_to_id[ANCHOR2])
             if torch.any(anchor_mask_tokens):
                 noise_mask = noise_mask | anchor_mask_tokens
                 noisy_tokens = noisy_tokens.masked_fill(anchor_mask_tokens, vocab.mask_id)
@@ -544,8 +551,15 @@ def run_stage_b(config_path: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, type=str, help="Path to stage B YAML config.")
+    parser.add_argument(
+        "--tokenization-method",
+        type=str,
+        choices=["character", "atom_regex", "safe"],
+        default=None,
+        help="Tokenization method to use (overrides config file setting). Options: character, atom_regex, safe."
+    )
     args = parser.parse_args()
-    run_stage_b(args.config)
+    run_stage_b(args.config, tokenization_method=args.tokenization_method)
 
 
 if __name__ == "__main__":

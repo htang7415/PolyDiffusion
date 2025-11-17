@@ -7,18 +7,18 @@ from collections import Counter
 from pathlib import Path
 from typing import Iterable, List, Optional, Pattern, Sequence, Tuple
 
-from .ap_smiles import SHIELD1, SHIELD2, shield_anchors, unshield_anchors
+from .ap_smiles import ANCHOR1, ANCHOR2
 from .base_vocab import BaseVocabulary
 
 # Special tokens for all vocabularies
 SPECIAL_TOKENS_PLAIN = ["<PAD>", "<BOS>", "<EOS>", "<MASK>", "<UNK>"]
-SPECIAL_TOKENS_ANCHOR = ["<PAD>", "<BOS>", "<EOS>", "<MASK>", "<UNK>", SHIELD1, SHIELD2]
+SPECIAL_TOKENS_ANCHOR = ["<PAD>", "<BOS>", "<EOS>", "<MASK>", "<UNK>", ANCHOR1, ANCHOR2]
 
 # SMILES atom-level regex pattern
 # Matches chemically meaningful units: atoms, bonds, rings, brackets
 SMILES_ATOM_REGEX = re.compile(
     r"""
-    \[[^\]]+\]          # Bracketed atoms: [C@H], [Si], [Na], [NH+], [O-], [*:1], [Zz]
+    \[[^\]]+\]          # Bracketed atoms: [C@H], [Si], [Na], [NH+], [O-], [*:1], [*:2]
     | Br | Cl           # Two-character atoms (must come before B, C)
     | [BCNOSPFIbcnosp]  # Single-character atoms
     | @@?               # Chirality markers: @ or @@
@@ -122,21 +122,20 @@ class AnchorAtomVocab(BaseVocabulary):
     """
     Atom-level regex tokenization for Stage B/C (polymers with attachment points).
 
-    Same as PlainAtomVocab but:
-    - Shields [*:1] → [Zz], [*:2] → [Zr] before tokenization
-    - Treats [Zz] and [Zr] as single atomic tokens
-    - Unshields during detokenization
+    Same as PlainAtomVocab but includes anchor tokens [*:1] and [*:2] as atomic units.
+    The regex pattern already captures bracketed atoms as whole units, so [*:1] and [*:2]
+    are naturally tokenized correctly without any shielding needed.
 
     Example:
-        "[*:1]CCC[*:2]" → shield → "[Zz]CCC[Zr]"
-                        → tokenize → ['[Zz]', 'C', 'C', 'C', '[Zr]']
+        "[*:1]CCC[*:2]" → tokenize → ['[*:1]', 'C', 'C', 'C', '[*:2]']
+                        → IDs → [BOS, anchor1_id, C_id, C_id, C_id, anchor2_id, EOS]
                         → detokenize → "[*:1]CCC[*:2]"
     """
 
     def __init__(self, tokens: Sequence[str]):
-        if SHIELD1 not in tokens or SHIELD2 not in tokens:
+        if ANCHOR1 not in tokens or ANCHOR2 not in tokens:
             raise ValueError(
-                f"Anchor tokens {SHIELD1} and {SHIELD2} must be present in vocabulary."
+                f"Anchor tokens {ANCHOR1} and {ANCHOR2} must be present in vocabulary."
             )
         super().__init__(tokens)
         self.pattern = SMILES_ATOM_REGEX
@@ -152,11 +151,8 @@ class AnchorAtomVocab(BaseVocabulary):
         counts: Counter[str] = Counter()
 
         for ap_smiles in corpus:
-            # Shield anchors first
-            shielded = shield_anchors(ap_smiles)
-
-            # Tokenize with regex
-            tokens = _tokenize_regex(shielded, SMILES_ATOM_REGEX)
+            # Tokenize with regex - [*:1] and [*:2] are captured as whole units
+            tokens = _tokenize_regex(ap_smiles, SMILES_ATOM_REGEX)
 
             # Count tokens
             counts.update(tokens)
@@ -179,16 +175,13 @@ class AnchorAtomVocab(BaseVocabulary):
         return cls(vocab_tokens)
 
     def get_anchor_ids(self) -> Tuple[int, int]:
-        """Return (SHIELD1_id, SHIELD2_id)."""
-        return (self.token_to_id[SHIELD1], self.token_to_id[SHIELD2])
+        """Return (ANCHOR1_id, ANCHOR2_id) for polymer generation."""
+        return (self.token_to_id[ANCHOR1], self.token_to_id[ANCHOR2])
 
     def tokenize(self, ap_smiles: str) -> List[int]:
         """Tokenize AP-SMILES with anchor preservation."""
-        # Shield anchors: [*:1] → [Zz], [*:2] → [Zr]
-        shielded = shield_anchors(ap_smiles)
-
-        # Tokenize (anchors are preserved as single tokens by regex)
-        tokens = _tokenize_regex(shielded, self.pattern)
+        # Tokenize directly - regex captures [*:1] and [*:2] as whole units
+        tokens = _tokenize_regex(ap_smiles, self.pattern)
 
         # Convert to IDs
         ids = [self.bos_id]
@@ -215,8 +208,5 @@ class AnchorAtomVocab(BaseVocabulary):
                 continue
             tokens.append(token)
 
-        # Reconstruct shielded AP-SMILES
-        shielded = "".join(tokens)
-
-        # Unshield: [Zz] → [*:1], [Zr] → [*:2]
-        return unshield_anchors(shielded)
+        # Reconstruct AP-SMILES directly
+        return "".join(tokens)

@@ -9,6 +9,7 @@ from typing import Iterable, Optional
 from .atom_regex_vocab import AnchorAtomVocab, PlainAtomVocab
 from .base_vocab import BaseVocabulary
 from .character_vocab import AnchorCharacterVocab, PlainCharacterVocab
+from .polymer_bpe_vocab import PolymerBPEVocab
 from .safe_vocab import AnchorSAFEVocab, PlainSAFEVocab, RDKIT_AVAILABLE
 from .vocab_config import TokenizationConfig
 
@@ -29,7 +30,7 @@ def create_vocabulary(
         corpus: Optional corpus to build vocab (if not loading from file)
 
     Returns:
-        BaseVocabulary instance (character, atom-regex, or SAFE)
+        BaseVocabulary instance (character, atom-regex, SAFE, or polymer_bpe)
 
     Raises:
         ValueError: If invalid method or stage
@@ -56,10 +57,19 @@ def create_vocabulary(
         VocabClass = AnchorSAFEVocab if has_anchors else PlainSAFEVocab
         log.info(f"Using SAFE fragment-based tokenization for stage {stage.upper()}")
 
+    elif method == 'polymer_bpe':
+        if not has_anchors:
+            raise ValueError(
+                "polymer_bpe method only supports stages B/C (with anchors). "
+                "Use 'character' or 'atom_regex' for stage A."
+            )
+        VocabClass = PolymerBPEVocab
+        log.info(f"Using Polymer BPE tokenization for stage {stage.upper()}")
+
     else:
         raise ValueError(
             f"Unknown tokenization method: {method}. "
-            f"Must be 'character', 'atom_regex', or 'safe'"
+            f"Must be 'character', 'atom_regex', 'safe', or 'polymer_bpe'"
         )
 
     # Load from file or build from corpus
@@ -132,6 +142,8 @@ def load_vocabulary_auto(
             if not RDKIT_AVAILABLE:
                 raise ImportError("SAFE vocab requires RDKit")
             VocabClass = AnchorSAFEVocab if has_anchors else PlainSAFEVocab
+        elif method in ('PolymerBPEVocab', 'polymer_bpe'):
+            VocabClass = PolymerBPEVocab
         else:
             log.warning(f"Unknown method in metadata: {method}, falling back to character")
             VocabClass = AnchorCharacterVocab if has_anchors else PlainCharacterVocab
@@ -153,6 +165,8 @@ def load_vocabulary_auto(
             if not RDKIT_AVAILABLE:
                 raise ImportError("SAFE vocab requires RDKit")
             VocabClass = AnchorSAFEVocab if has_anchors else PlainSAFEVocab
+        elif method == 'polymer_bpe':
+            VocabClass = PolymerBPEVocab
         else:
             raise ValueError(f"Unknown method: {method}")
 

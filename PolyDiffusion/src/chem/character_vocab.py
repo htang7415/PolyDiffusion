@@ -6,12 +6,12 @@ from collections import Counter
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
 
-from .ap_smiles import SHIELD1, SHIELD2, shield_anchors, unshield_anchors
+from .ap_smiles import ANCHOR1, ANCHOR2
 from .base_vocab import BaseVocabulary
 
 # Special tokens
 SPECIAL_TOKENS_PLAIN = ["<PAD>", "<BOS>", "<EOS>", "<MASK>", "<UNK>"]
-SPECIAL_TOKENS_ANCHOR = ["<PAD>", "<BOS>", "<EOS>", "<MASK>", "<UNK>", SHIELD1, SHIELD2]
+SPECIAL_TOKENS_ANCHOR = ["<PAD>", "<BOS>", "<EOS>", "<MASK>", "<UNK>", ANCHOR1, ANCHOR2]
 
 
 class PlainCharacterVocab(BaseVocabulary):
@@ -92,22 +92,19 @@ class AnchorCharacterVocab(BaseVocabulary):
     Character-level tokenization for Stage B/C (polymers with attachment points).
 
     Same as PlainCharacterVocab but:
-    - Shields [*:1] → [Zz], [*:2] → [Zr] before tokenization
-    - Treats [Zz] and [Zr] as multi-character units (via _split_shielded)
-    - Unshields during detokenization
-
-    This is the original Stage B/C implementation.
+    - Treats [*:1] and [*:2] as multi-character units (via _split_anchors)
+    - Anchors are atomic tokens, not split character-by-character
 
     Example:
-        "[*:1]CCC[*:2]" → shield → "[Zz]CCC[Zr]"
-                        → split → ['[Zz]', 'C', 'C', 'C', '[Zr]']
+        "[*:1]CCC[*:2]" → split → ['[*:1]', 'C', 'C', 'C', '[*:2]']
+                        → tokenize → [BOS, anchor1_id, C_id, C_id, C_id, anchor2_id, EOS]
                         → detokenize → "[*:1]CCC[*:2]"
     """
 
     def __init__(self, tokens: Sequence[str]):
-        if SHIELD1 not in tokens or SHIELD2 not in tokens:
+        if ANCHOR1 not in tokens or ANCHOR2 not in tokens:
             raise ValueError(
-                f"Anchor tokens {SHIELD1} and {SHIELD2} must be present in vocabulary."
+                f"Anchor tokens {ANCHOR1} and {ANCHOR2} must be present in vocabulary."
             )
         super().__init__(tokens)
 
@@ -122,11 +119,9 @@ class AnchorCharacterVocab(BaseVocabulary):
         counts: Counter[str] = Counter()
 
         for ap_smiles in corpus:
-            shielded = shield_anchors(ap_smiles)
-
-            # Split shielded string
-            for part in _split_shielded(shielded):
-                if part in (SHIELD1, SHIELD2):
+            # Split AP-SMILES into parts, keeping anchors as units
+            for part in _split_anchors(ap_smiles):
+                if part in (ANCHOR1, ANCHOR2):
                     counts[part] += 1
                 else:
                     for char in part:
@@ -150,16 +145,14 @@ class AnchorCharacterVocab(BaseVocabulary):
         return cls(vocab_tokens)
 
     def get_anchor_ids(self) -> Tuple[int, int]:
-        """Return (SHIELD1_id, SHIELD2_id)."""
-        return (self.token_to_id[SHIELD1], self.token_to_id[SHIELD2])
+        """Return (ANCHOR1_id, ANCHOR2_id) for polymer generation."""
+        return (self.token_to_id[ANCHOR1], self.token_to_id[ANCHOR2])
 
     def tokenize(self, ap_smiles: str) -> List[int]:
         """Tokenize AP-SMILES with anchor preservation."""
-        shielded = shield_anchors(ap_smiles)
-
         ids = [self.bos_id]
-        for part in _split_shielded(shielded):
-            if part in (SHIELD1, SHIELD2):
+        for part in _split_anchors(ap_smiles):
+            if part in (ANCHOR1, ANCHOR2):
                 ids.append(self.token_to_id[part])
             else:
                 for char in part:
@@ -185,33 +178,41 @@ class AnchorCharacterVocab(BaseVocabulary):
                 continue
             tokens.append(token)
 
-        shielded = "".join(tokens)
-        return unshield_anchors(shielded)
+        return "".join(tokens)
 
 
-def _split_shielded(smiles: str) -> List[str]:
+def _split_anchors(smiles: str) -> List[str]:
     """
-    Split shielded AP-SMILES into parts, keeping anchors as units.
+    Split AP-SMILES into parts, keeping anchors [*:1] and [*:2] as units.
 
-    Helper function from original vocab.py implementation.
+    This function treats the 5-character anchors [*:1] and [*:2] as atomic tokens,
+    preventing them from being split character-by-character.
+
+    Args:
+        smiles: AP-SMILES string with [*:1] and [*:2] attachment points
+
+    Returns:
+        List of parts: anchor tokens as whole units, other parts as strings
+
+    Example:
+        "[*:1]CCC[*:2]" → ['[*:1]', 'CCC', '[*:2]']
     """
-    anchors = (SHIELD1, SHIELD2)
     pieces: List[str] = []
     buffer = ""
     i = 0
     while i < len(smiles):
-        if smiles.startswith(SHIELD1, i):
+        if smiles.startswith(ANCHOR1, i):
             if buffer:
                 pieces.append(buffer)
                 buffer = ""
-            pieces.append(SHIELD1)
-            i += len(SHIELD1)
-        elif smiles.startswith(SHIELD2, i):
+            pieces.append(ANCHOR1)
+            i += len(ANCHOR1)  # Skip 5 characters: [*:1]
+        elif smiles.startswith(ANCHOR2, i):
             if buffer:
                 pieces.append(buffer)
                 buffer = ""
-            pieces.append(SHIELD2)
-            i += len(SHIELD2)
+            pieces.append(ANCHOR2)
+            i += len(ANCHOR2)  # Skip 5 characters: [*:2]
         else:
             buffer += smiles[i]
             i += 1

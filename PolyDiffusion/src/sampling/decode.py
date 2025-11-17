@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Iterable, List, Sequence
 
-from ..chem.ap_smiles import SHIELD1, SHIELD2, unshield_anchors
+from ..chem.ap_smiles import ANCHOR1, ANCHOR2
 from ..chem.base_vocab import BaseVocabulary
 from ..chem.vocab import AnchorSafeVocab  # Backward compat
 
@@ -13,7 +13,10 @@ log = logging.getLogger(__name__)
 
 
 def _build_shielded_tokens(vocab: BaseVocabulary, sequence: Sequence[int]) -> List[str]:
-    """Convert token ids to shielded tokens without special markers."""
+    """Convert token ids to tokens without special markers.
+
+    Note: Function name kept for backward compatibility (no longer uses shielding).
+    """
     specials = {vocab.pad_id, vocab.bos_id, vocab.eos_id}
     tokens: List[str] = []
     for token_id in sequence:
@@ -27,13 +30,17 @@ def _build_shielded_tokens(vocab: BaseVocabulary, sequence: Sequence[int]) -> Li
 
 
 def _build_shielded_string(vocab: BaseVocabulary, sequence: Sequence[int]) -> str:
+    """Convert token ids to string without special markers.
+
+    Note: Function name kept for backward compatibility (no longer uses shielding).
+    """
     return "".join(_build_shielded_tokens(vocab, sequence))
 
 
 def _fallback_decode(vocab: BaseVocabulary, sequence: Sequence[int]) -> str:
     """Gracefully recover a string when detokenisation fails.
 
-    The fallback removes any existing anchor markers, wraps the payload between
+    The fallback removes any duplicate anchor markers, wraps the payload between
     a single pair of anchors, and returns a best-effort AP-SMILES string.
     """
     raw_tokens = _build_shielded_tokens(vocab, sequence)
@@ -41,49 +48,53 @@ def _fallback_decode(vocab: BaseVocabulary, sequence: Sequence[int]) -> str:
         return ""
 
     sanitized_tokens: List[str] = []
-    shield1_seen = False
-    shield2_seen = False
+    anchor1_seen = False
+    anchor2_seen = False
     for token in raw_tokens:
-        if token == SHIELD1:
-            if not shield1_seen:
+        if token == ANCHOR1:
+            if not anchor1_seen:
                 sanitized_tokens.append(token)
-                shield1_seen = True
+                anchor1_seen = True
             else:
+                # Replace duplicate anchor with carbon
                 sanitized_tokens.append("C")
-        elif token == SHIELD2:
-            if not shield2_seen:
+        elif token == ANCHOR2:
+            if not anchor2_seen:
                 sanitized_tokens.append(token)
-                shield2_seen = True
+                anchor2_seen = True
             else:
+                # Replace duplicate anchor with carbon
                 sanitized_tokens.append("C")
         else:
             sanitized_tokens.append(token)
 
-    if not shield1_seen and shield2_seen:
-        sanitized_tokens.insert(0, SHIELD1)
-        shield1_seen = True
-    elif shield1_seen and not shield2_seen:
-        sanitized_tokens.append(SHIELD2)
-        shield2_seen = True
-    elif not shield1_seen and not shield2_seen:
-        sanitized_tokens.insert(0, SHIELD1)
-        sanitized_tokens.append(SHIELD2)
-        shield1_seen = shield2_seen = True
+    # Ensure we have both anchors
+    if not anchor1_seen and anchor2_seen:
+        sanitized_tokens.insert(0, ANCHOR1)
+        anchor1_seen = True
+    elif anchor1_seen and not anchor2_seen:
+        sanitized_tokens.append(ANCHOR2)
+        anchor2_seen = True
+    elif not anchor1_seen and not anchor2_seen:
+        sanitized_tokens.insert(0, ANCHOR1)
+        sanitized_tokens.append(ANCHOR2)
+        anchor1_seen = anchor2_seen = True
 
-    shielded = "".join(sanitized_tokens)
-    try:
-        return unshield_anchors(shielded)
-    except ValueError:
-        core = "".join(tok for tok in sanitized_tokens if tok not in (SHIELD1, SHIELD2))
-        if not core:
-            log.warning(f"Empty core tokens during fallback decode for sequence: {sequence[:20]}...")
-            return ""
-        fallback_shielded = f"{SHIELD1}{core}{SHIELD2}"
-        try:
-            return unshield_anchors(fallback_shielded)
-        except ValueError:
-            log.warning(f"Failed to decode sequence even with fallback: {sequence[:20]}...")
-            return ""
+    # Reconstruct AP-SMILES directly (no unshielding needed)
+    ap_smiles = "".join(sanitized_tokens)
+
+    # Validate structure
+    if ANCHOR1 in ap_smiles and ANCHOR2 in ap_smiles:
+        return ap_smiles
+
+    # Last resort: wrap core content with anchors
+    core = "".join(tok for tok in sanitized_tokens if tok not in (ANCHOR1, ANCHOR2))
+    if not core:
+        log.warning(f"Empty core tokens during fallback decode for sequence: {sequence[:20]}...")
+        return ""
+
+    fallback_ap_smiles = f"{ANCHOR1}{core}{ANCHOR2}"
+    return fallback_ap_smiles
 
 
 def decode_tokens(

@@ -8,8 +8,10 @@ from typing import Iterable, List, Sequence
 
 ANCHOR1 = "[*:1]"
 ANCHOR2 = "[*:2]"
-SHIELD1 = "[Zz]"
-SHIELD2 = "[Zr]"
+
+# DEPRECATED: Shielding no longer used - all tokenizers use [*:1]/[*:2] directly
+SHIELD1 = "[Zz]"  # Deprecated - kept for backward compatibility only
+SHIELD2 = "[Zr]"  # Deprecated - kept for backward compatibility only
 
 _TOKEN_PATTERN = re.compile(r"\[[^\[\]]+\]|.")
 
@@ -25,13 +27,21 @@ def _validate_ap_smiles(smiles: str) -> None:
 
 
 def shield_anchors(ap_smiles: str) -> str:
-    """Replace anchors with shield tokens used by the tokenizer."""
+    """DEPRECATED: Replace anchors with shield tokens.
+
+    This function is deprecated. All tokenizers now use [*:1]/[*:2] directly.
+    Kept for backward compatibility only.
+    """
     _validate_ap_smiles(ap_smiles)
     return ap_smiles.replace(ANCHOR1, SHIELD1).replace(ANCHOR2, SHIELD2)
 
 
 def unshield_anchors(shielded: str) -> str:
-    """Invert :func:`shield_anchors`."""
+    """DEPRECATED: Invert :func:`shield_anchors`.
+
+    This function is deprecated. All tokenizers now use [*:1]/[*:2] directly.
+    Kept for backward compatibility only.
+    """
     if SHIELD1 not in shielded or SHIELD2 not in shielded:
         raise ValueError("Shielded string must contain both [Zz] and [Zr].")
     result = shielded.replace(SHIELD1, ANCHOR1).replace(SHIELD2, ANCHOR2)

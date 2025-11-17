@@ -82,16 +82,16 @@ def test_no_attachment_points() -> None:
     corpus = ["CCO", "CC(=O)O"]
     vocab = PlainVocab.build(corpus)
 
-    # Should NOT have [Zz] or [Zr]
-    assert "[Zz]" not in vocab.id_to_token
-    assert "[Zr]" not in vocab.id_to_token
+    # Should NOT have [*:1] or [*:2]
+    assert "[*:1]" not in vocab.id_to_token
+    assert "[*:2]" not in vocab.id_to_token
 
     # Tokenization should not add anchors
     tokens = vocab.tokenize("CCO")
     token_strs = [vocab.id_to_token[t] for t in tokens]
 
-    assert "[Zz]" not in token_strs
-    assert "[Zr]" not in token_strs
+    assert "[*:1]" not in token_strs
+    assert "[*:2]" not in token_strs
 
 
 def test_save_and_load() -> None:
@@ -157,11 +157,11 @@ def test_stage_a_vs_stage_b_difference() -> None:
     assert "<EOS>" in plain_strs
     assert plain_strs.count("C") == 2
     assert plain_strs.count("O") == 1
-    assert "[Zz]" not in plain_strs
-    assert "[Zr]" not in plain_strs
+    assert "[*:1]" not in plain_strs
+    assert "[*:2]" not in plain_strs
 
-    # AnchorSafeVocab: [<BOS>, [Zz], C, C, O, [Zr], <EOS>]
+    # AnchorSafeVocab: [<BOS>, [*:1], C, C, O, [*:2], <EOS>]
     assert "<BOS>" in anchor_strs
     assert "<EOS>" in anchor_strs
-    assert "[Zz]" in anchor_strs
-    assert "[Zr]" in anchor_strs
+    assert "[*:1]" in anchor_strs
+    assert "[*:2]" in anchor_strs

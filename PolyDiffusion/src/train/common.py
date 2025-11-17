@@ -12,7 +12,7 @@ import yaml
 from torch.utils.data import DataLoader, random_split
 
 from ..chem import valence as valence_utils
-from ..chem.ap_smiles import ANCHOR1, ANCHOR2, SHIELD1, SHIELD2
+from ..chem.ap_smiles import ANCHOR1, ANCHOR2
 from ..chem import convert_polymer_to_ap_smiles
 from ..chem.base_vocab import BaseVocabulary
 from ..chem.vocab import AnchorSafeVocab  # Backward compat
@@ -545,7 +545,7 @@ def compute_eval_loss_stage_b(
 
             timesteps = model.diffusion.sample_timesteps(tokens.size(0))
             noisy_tokens, noise_mask = model.diffusion.q_sample(tokens, timesteps)
-            anchor_mask_tokens = (tokens == vocab.token_to_id[SHIELD1]) | (tokens == vocab.token_to_id[SHIELD2])
+            anchor_mask_tokens = (tokens == vocab.token_to_id[ANCHOR1]) | (tokens == vocab.token_to_id[ANCHOR2])
             if torch.any(anchor_mask_tokens):
                 noise_mask = noise_mask | anchor_mask_tokens
                 noisy_tokens = noisy_tokens.masked_fill(anchor_mask_tokens, vocab.mask_id)
@@ -614,7 +614,7 @@ def compute_eval_loss_stage_c(
 
             timesteps = model.diffusion.sample_timesteps(tokens.size(0))
             noisy_tokens, noise_mask = model.diffusion.q_sample(tokens, timesteps)
-            anchor_mask_tokens = (tokens == vocab.token_to_id[SHIELD1]) | (tokens == vocab.token_to_id[SHIELD2])
+            anchor_mask_tokens = (tokens == vocab.token_to_id[ANCHOR1]) | (tokens == vocab.token_to_id[ANCHOR2])
             if torch.any(anchor_mask_tokens):
                 noise_mask = noise_mask | anchor_mask_tokens
                 noisy_tokens = noisy_tokens.masked_fill(anchor_mask_tokens, vocab.mask_id)

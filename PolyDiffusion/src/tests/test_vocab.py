@@ -1,10 +1,11 @@
-from PolyDiffusion.chem.vocab import AnchorSafeVocab, SHIELD1, SHIELD2
+from PolyDiffusion.chem.ap_smiles import ANCHOR1, ANCHOR2
+from PolyDiffusion.chem.vocab import AnchorSafeVocab
 
 
 def test_anchor_tokens_present() -> None:
     vocab = AnchorSafeVocab.build(["[*:1]C[*:2]"])
-    assert SHIELD1 in vocab.token_to_id
-    assert SHIELD2 in vocab.token_to_id
+    assert ANCHOR1 in vocab.token_to_id
+    assert ANCHOR2 in vocab.token_to_id
 
 
 def test_roundtrip_tokenization() -> None:

@@ -128,7 +128,7 @@ diffusion:
 # ============================================================================
 
 data:
-  path: Data/SMiPoly_polymers_filtered.gz  # Filtered dataset (10.8M polymers)
+  path: Data/Polymer/SMiPoly_polymers_filtered.gz  # Filtered dataset (10.8M polymers)
                                            # Created by filter_polymer_dataset.py
                                            # Removed: isotopes, charges, stereochemistry
                                            # All polymers have exactly 2 attachment points

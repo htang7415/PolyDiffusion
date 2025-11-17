@@ -11,7 +11,7 @@ class TokenizationConfig:
     """Configuration for tokenization method and vocabulary building."""
 
     # Tokenization method
-    method: Literal['character', 'atom_regex', 'safe'] = 'character'
+    method: Literal['character', 'atom_regex', 'safe', 'polymer_bpe'] = 'character'
 
     # Vocabulary file path
     vocab_path: str = ''
@@ -30,7 +30,7 @@ class TokenizationConfig:
 
     def __post_init__(self):
         """Validate configuration."""
-        valid_methods = {'character', 'atom_regex', 'safe'}
+        valid_methods = {'character', 'atom_regex', 'safe', 'polymer_bpe'}
         if self.method not in valid_methods:
             raise ValueError(
                 f"Invalid tokenization method '{self.method}'. "

@@ -7,13 +7,13 @@ from collections import Counter
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
 
-from .ap_smiles import SHIELD1, SHIELD2, shield_anchors, unshield_anchors
+from .ap_smiles import ANCHOR1, ANCHOR2
 from .atom_regex_vocab import SMILES_ATOM_REGEX, _tokenize_regex
 from .base_vocab import BaseVocabulary
 
 # Special tokens
 SPECIAL_TOKENS_PLAIN = ["<PAD>", "<BOS>", "<EOS>", "<MASK>", "<UNK>"]
-SPECIAL_TOKENS_ANCHOR = ["<PAD>", "<BOS>", "<EOS>", "<MASK>", "<UNK>", SHIELD1, SHIELD2]
+SPECIAL_TOKENS_ANCHOR = ["<PAD>", "<BOS>", "<EOS>", "<MASK>", "<UNK>", ANCHOR1, ANCHOR2]
 
 # Check for SAFE library availability
 try:
@@ -33,8 +33,8 @@ class PlainSAFEVocab(BaseVocabulary):
     meaningful fragments, then tokenizes at fragment level.
 
     Process:
-        1. SMILES → BRICS fragments
-        2. Fragments → SAFE encoding (with ring notation for linking)
+        1. SMILES → BRICS fragments (with [*] dummy atoms)
+        2. Fragments → SAFE encoding (remove [*] markers, join with dots)
         3. SAFE string → Tokens (fragment-aware)
         4. Tokens → IDs
 
@@ -44,9 +44,12 @@ class PlainSAFEVocab(BaseVocabulary):
         3. SAFE string → SMILES (via RDKit parsing)
 
     Example:
-        "OCCc1ccccc1" → BRICS → ["[*]CCO", "[*]c1ccccc1"]
-                      → SAFE → "c1ccccc1%10.%10CCO"
-                      → Tokens → ['c1ccccc1%10', '.', '%10CCO']
+        "OCCc1ccccc1" → BRICS → ["[8*]CCO", "[16*]c1ccccc1"]
+                      → SAFE → "c1ccccc1.CCO"
+                      → Tokens → ['c1ccccc1', '.', 'CCO']
+
+    Note: BRICS dummy atoms [*] are removed to create valid SMILES fragments.
+    The model learns valid fragment combinations through training data patterns.
     """
 
     def __init__(self, tokens: Sequence[str]):
@@ -83,8 +86,11 @@ class PlainSAFEVocab(BaseVocabulary):
                 # BRICS decomposition
                 fragments = BRICS.BRICSDecompose(mol)
 
-                # Count fragments
-                fragment_counts.update(fragments)
+                # Normalize fragments (replace [*] with canonical ring numbers)
+                normalized_fragments = [cls._normalize_fragment(frag) for frag in fragments]
+
+                # Count normalized fragments
+                fragment_counts.update(normalized_fragments)
 
             except Exception:
                 # Skip invalid SMILES
@@ -142,6 +148,61 @@ class PlainSAFEVocab(BaseVocabulary):
             '@', '@@', '.',
         ]
 
+    @staticmethod
+    def _normalize_fragment(fragment: str) -> str:
+        """
+        Normalize a BRICS fragment by removing [*] dummy atoms and cleaning up.
+
+        BRICS fragments have dummy atoms like [3*], [16*] that indicate attachment points.
+        For vocabulary storage and tokenization, we remove these markers since:
+        1. Individual fragments in vocabulary should be valid SMILES
+        2. The model learns fragment combinations through training data patterns
+        3. Dummy atoms would create invalid SMILES when parsed standalone
+
+        Args:
+            fragment: BRICS fragment (e.g., "[3*]CCO" or "[3*]C([16*])CC")
+
+        Returns:
+            Normalized fragment with [*] removed (e.g., "CCO" or "C(CC)")
+        """
+        # Remove all [N*] dummy atom patterns
+        normalized = re.sub(r'\[\d+\*\]', '', fragment)
+
+        # Clean up empty parentheses left by removed dummy atoms
+        # e.g., "C()C" → "CC", "N()SC" → "NSC"
+        normalized = re.sub(r'\(\)', '', normalized)
+
+        return normalized
+
+    @staticmethod
+    def _brics_to_safe(fragments: List[str]) -> str:
+        """
+        Convert BRICS fragments with [*] dummy atoms to SAFE encoding.
+
+        BRICS fragments contain dummy atoms like [3*], [16*] that indicate attachment points.
+        For SAFE encoding, we remove these markers and join fragments with dots.
+        The model learns valid fragment combinations from training data patterns.
+
+        Args:
+            fragments: List of BRICS fragments (e.g., ["[3*]CCO", "[16*]c1ccccc1"])
+
+        Returns:
+            SAFE-encoded string with [*] removed (e.g., "c1ccccc1.CCO")
+
+        Example:
+            Input:  ["[3*]CCO", "[16*]c1ccccc1"]
+            Output: "c1ccccc1.CCO"
+        """
+        if not fragments:
+            return ""
+
+        # Normalize each fragment (remove [*] markers)
+        normalized_frags = [PlainSAFEVocab._normalize_fragment(frag) for frag in fragments]
+
+        # Sort by length (longer fragments first) and join with dots
+        normalized_frags.sort(key=len, reverse=True)
+        return ".".join(normalized_frags)
+
     def tokenize(self, smiles: str) -> List[int]:
         """
         Tokenize SMILES → SAFE → Token IDs.
@@ -168,7 +229,7 @@ class PlainSAFEVocab(BaseVocabulary):
             return self._fallback_tokenize(smiles)
 
     def _smiles_to_safe(self, smiles: str) -> str:
-        """Convert SMILES to SAFE encoding."""
+        """Convert SMILES to SAFE encoding with proper ring notation."""
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             raise ValueError(f"Invalid SMILES: {smiles}")
@@ -180,10 +241,8 @@ class PlainSAFEVocab(BaseVocabulary):
             # No fragmentation possible - return SMILES as-is
             return smiles
 
-        # Encode as SAFE (simplified: concatenate with dots)
-        # Real SAFE uses ring notation for linking, but for simplicity
-        # we'll use dot-separated fragments
-        safe_string = ".".join(sorted(fragments, key=len, reverse=True))
+        # Convert BRICS fragments to SAFE encoding with ring notation
+        safe_string = self._brics_to_safe(fragments)
 
         return safe_string
 
@@ -270,14 +329,13 @@ class AnchorSAFEVocab(BaseVocabulary):
     SAFE tokenization for Stage B/C (polymers with attachment points).
 
     Hybrid approach:
-    - Preserves [Zz] and [Zr] as atomic tokens (no fragmentation)
+    - Preserves [*:1] and [*:2] as atomic tokens (no fragmentation)
     - Applies SAFE fragmentation to polymer backbone between anchors
     - Reconstructs AP-SMILES during decoding
 
     Example:
-        "[*:1]CCC[*:2]" → shield → "[Zz]CCC[Zr]"
-                        → SAFE middle → "[Zz]<fragments>[Zr]"
-                        → tokenize → [[Zz], fragment_tokens, [Zr]]
+        "[*:1]CCC[*:2]" → SAFE middle → "[*:1]<fragments>[*:2]"
+                        → tokenize → [[*:1], fragment_tokens, [*:2]]
                         → detokenize → "[*:1]CCC[*:2]"
     """
 
@@ -286,9 +344,9 @@ class AnchorSAFEVocab(BaseVocabulary):
             raise ImportError(
                 "SAFE tokenization requires RDKit. Install with: pip install rdkit"
             )
-        if SHIELD1 not in tokens or SHIELD2 not in tokens:
+        if ANCHOR1 not in tokens or ANCHOR2 not in tokens:
             raise ValueError(
-                f"Anchor tokens {SHIELD1} and {SHIELD2} must be present in vocabulary."
+                f"Anchor tokens {ANCHOR1} and {ANCHOR2} must be present in vocabulary."
             )
         super().__init__(tokens)
 
@@ -304,11 +362,8 @@ class AnchorSAFEVocab(BaseVocabulary):
 
         for ap_smiles in corpus:
             try:
-                # Shield anchors
-                shielded = shield_anchors(ap_smiles)
-
                 # Extract middle part (between anchors)
-                match = re.match(r'\[Zz\](.*)\[Zr\]', shielded)
+                match = re.match(r'\[\*:1\](.*)\[\*:2\]', ap_smiles)
                 if not match:
                     continue
 
@@ -318,7 +373,9 @@ class AnchorSAFEVocab(BaseVocabulary):
                 mol = Chem.MolFromSmiles(middle)
                 if mol is not None:
                     fragments = BRICS.BRICSDecompose(mol)
-                    fragment_counts.update(fragments)
+                    # Normalize fragments (replace [*] with canonical ring numbers)
+                    normalized_fragments = [PlainSAFEVocab._normalize_fragment(frag) for frag in fragments]
+                    fragment_counts.update(normalized_fragments)
 
             except Exception:
                 continue
@@ -360,27 +417,24 @@ class AnchorSAFEVocab(BaseVocabulary):
         return cls(vocab_tokens)
 
     def get_anchor_ids(self) -> Tuple[int, int]:
-        """Return (SHIELD1_id, SHIELD2_id)."""
-        return (self.token_to_id[SHIELD1], self.token_to_id[SHIELD2])
+        """Return (ANCHOR1_id, ANCHOR2_id) for polymer generation."""
+        return (self.token_to_id[ANCHOR1], self.token_to_id[ANCHOR2])
 
     def tokenize(self, ap_smiles: str) -> List[int]:
         """Tokenize AP-SMILES with SAFE fragmentation of middle part."""
         try:
-            # Shield anchors
-            shielded = shield_anchors(ap_smiles)
-
-            # Extract parts: [Zz] + middle + [Zr]
-            match = re.match(r'(\[Zz\])(.*?)(\[Zr\])', shielded)
+            # Extract parts: [*:1] + middle + [*:2]
+            match = re.match(r'(\[\*:1\])(.*?)(\[\*:2\])', ap_smiles)
             if not match:
                 raise ValueError(f"Invalid AP-SMILES: {ap_smiles}")
 
             anchor1, middle, anchor2 = match.groups()
 
-            # Tokenize: [Zz] + SAFE(middle) + [Zr]
+            # Tokenize: [*:1] + SAFE(middle) + [*:2]
             ids = [self.bos_id]
 
             # Anchor 1
-            ids.append(self.token_to_id[SHIELD1])
+            ids.append(self.token_to_id[ANCHOR1])
 
             # Middle (SAFE-tokenized)
             middle_safe = self._smiles_to_safe(middle) if middle else ""
@@ -389,7 +443,7 @@ class AnchorSAFEVocab(BaseVocabulary):
                 ids.append(self.token_to_id.get(token, self.unk_id))
 
             # Anchor 2
-            ids.append(self.token_to_id[SHIELD2])
+            ids.append(self.token_to_id[ANCHOR2])
 
             ids.append(self.eos_id)
 
@@ -400,7 +454,7 @@ class AnchorSAFEVocab(BaseVocabulary):
             return self._fallback_tokenize(ap_smiles)
 
     def _smiles_to_safe(self, smiles: str) -> str:
-        """Convert SMILES to SAFE (same as PlainSAFEVocab)."""
+        """Convert SMILES to SAFE with ring notation (same as PlainSAFEVocab)."""
         if not smiles:
             return ""
 
@@ -412,7 +466,8 @@ class AnchorSAFEVocab(BaseVocabulary):
         if not fragments:
             return smiles
 
-        return ".".join(sorted(fragments, key=len, reverse=True))
+        # Use the same conversion as PlainSAFEVocab
+        return PlainSAFEVocab._brics_to_safe(fragments)
 
     def _tokenize_safe(self, safe_string: str) -> List[str]:
         """Tokenize SAFE string (same as PlainSAFEVocab)."""
@@ -435,8 +490,8 @@ class AnchorSAFEVocab(BaseVocabulary):
 
     def _fallback_tokenize(self, ap_smiles: str) -> List[int]:
         """Fallback to atom-level tokenization."""
-        shielded = shield_anchors(ap_smiles)
-        tokens = _tokenize_regex(shielded, SMILES_ATOM_REGEX)
+        # Tokenize directly - regex captures [*:1] and [*:2] as whole units
+        tokens = _tokenize_regex(ap_smiles, SMILES_ATOM_REGEX)
         ids = [self.bos_id]
         for token in tokens:
             ids.append(self.token_to_id.get(token, self.unk_id))
@@ -444,7 +499,7 @@ class AnchorSAFEVocab(BaseVocabulary):
         return ids
 
     def detokenize(self, token_ids: Sequence[int]) -> str:
-        """Convert Token IDs → Shielded SAFE → AP-SMILES."""
+        """Convert Token IDs → SAFE → AP-SMILES."""
         tokens: List[str] = []
         specials = {self.pad_id, self.bos_id, self.eos_id}
 
@@ -460,21 +515,20 @@ class AnchorSAFEVocab(BaseVocabulary):
                 continue
             tokens.append(token)
 
-        # Reconstruct shielded SAFE
-        safe_shielded = "".join(tokens)
+        # Reconstruct AP-SMILES with SAFE
+        ap_smiles = "".join(tokens)
 
         # Try to canonicalize middle part
         try:
-            match = re.match(r'(\[Zz\])(.*?)(\[Zr\])', safe_shielded)
+            match = re.match(r'(\[\*:1\])(.*?)(\[\*:2\])', ap_smiles)
             if match:
                 anchor1, middle, anchor2 = match.groups()
                 if middle:
                     mol = Chem.MolFromSmiles(middle)
                     if mol:
                         middle = Chem.MolToSmiles(mol, canonical=True)
-                safe_shielded = anchor1 + middle + anchor2
+                ap_smiles = anchor1 + middle + anchor2
         except Exception:
             pass
 
-        # Unshield: [Zz] → [*:1], [Zr] → [*:2]
-        return unshield_anchors(safe_shielded)
+        return ap_smiles

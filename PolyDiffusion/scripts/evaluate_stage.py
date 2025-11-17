@@ -34,7 +34,7 @@ from typing import Dict, List, Optional, Set
 import torch
 import numpy as np
 
-from PolyDiffusion.chem.ap_smiles import ANCHOR1, ANCHOR2, unshield_anchors
+from PolyDiffusion.chem.ap_smiles import ANCHOR1, ANCHOR2
 from PolyDiffusion.chem.plain_vocab import PlainVocab
 from PolyDiffusion.chem.valence import has_two_anchors
 from PolyDiffusion.chem.vocab import AnchorSafeVocab
@@ -87,13 +87,8 @@ def load_samples_from_file(path: Path, stage: str) -> tuple[List[str], List[Dict
         return lines, [{} for _ in lines]
 
     if stage == "b":
-        ap_smiles: List[str] = []
-        for line in lines:
-            try:
-                ap = unshield_anchors(line)
-            except ValueError:
-                ap = line
-            ap_smiles.append(ap)
+        # Lines should already be AP-SMILES with [*:1] and [*:2] anchors
+        ap_smiles: List[str] = lines
         return ap_smiles, [{} for _ in ap_smiles]
 
     raise ValueError("Stage C metrics require model predictions; omit --samples for Stage C evaluation.")

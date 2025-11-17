@@ -1,15 +1,23 @@
+"""Tests for AP-SMILES utilities.
+
+Note: shield_anchors() and unshield_anchors() are DEPRECATED.
+Tests for these functions are kept for backward compatibility testing only.
+All new code should use [*:1] and [*:2] anchors directly.
+"""
+
 import pytest
 
 from PolyDiffusion.src.chem import (
     canonicalize_ap,
     convert_polymer_to_ap_smiles,
     randomize_ap,
-    shield_anchors,
-    unshield_anchors,
+    shield_anchors,  # DEPRECATED - tested for backward compatibility
+    unshield_anchors,  # DEPRECATED - tested for backward compatibility
 )
 
 
 def test_shield_unshield_roundtrip() -> None:
+    """Test deprecated shield/unshield functions (backward compatibility)."""
     smiles = "[*:1]CCO[*:2]"
     shielded = shield_anchors(smiles)
     assert "[Zz]" in shielded and "[Zr]" in shielded
