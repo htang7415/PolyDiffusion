@@ -7,7 +7,7 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 import torch
 
-from ..chem.ap_smiles import SHIELD1, SHIELD2
+from ..chem.ap_smiles import ANCHOR1, ANCHOR2
 from ..chem.base_vocab import BaseVocabulary
 from ..chem.plain_vocab import PlainVocab  # Backward compat
 from ..chem.vocab import AnchorSafeVocab  # Backward compat
@@ -179,11 +179,11 @@ class GuidedSampler:
         bos_id = self.vocab.bos_id
         eos_id = self.vocab.eos_id
         pad_id = self.vocab.pad_id
-        shield1_id = self.vocab.token_to_id[SHIELD1]
-        shield2_id = self.vocab.token_to_id[SHIELD2]
+        anchor1_id = self.vocab.token_to_id[ANCHOR1]
+        anchor2_id = self.vocab.token_to_id[ANCHOR2]
 
         tokens[:, 0] = bos_id
-        tokens[:, 1] = shield1_id
+        tokens[:, 1] = anchor1_id
 
         min_content = max(self.config.min_tokens, 1)
         if self.config.target_length_min is not None:
@@ -266,7 +266,7 @@ class GuidedSampler:
             logits = _mask_logits(logits, forbidden_ids)
 
             if eos_id is not None:
-                has_anchor2 = torch.any(tokens == shield2_id, dim=1)
+                has_anchor2 = torch.any(tokens == anchor2_id, dim=1)
                 content_lengths = torch.clamp((tokens != pad_id).sum(dim=1) - 2, min=0)
 
                 # Check which samples are ready for EOS (have anchor2 AND meet length target)
@@ -304,8 +304,8 @@ class GuidedSampler:
             update_mask = ~(anchor_mask | frozen_mask)
             tokens = torch.where(update_mask, sampled, tokens).detach()
             tokens[:, 0] = bos_id
-            tokens[:, 1] = shield1_id
-            anchor2_positions = tokens == shield2_id
+            tokens[:, 1] = anchor1_id
+            anchor2_positions = tokens == anchor2_id
             new_anchor2 = anchor2_positions & ~frozen_mask
             if torch.any(new_anchor2):
                 frozen_mask = frozen_mask | new_anchor2
@@ -318,7 +318,7 @@ class GuidedSampler:
                     pad_id,
                     prefix_length=2,
                     min_tokens=self.config.min_tokens,
-                    required_token_ids=(shield2_id,),
+                    required_token_ids=(anchor2_id,),
                 )
             attention_mask = tokens != pad_id
             final_outputs = {

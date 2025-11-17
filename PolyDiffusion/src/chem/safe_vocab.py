@@ -532,3 +532,12 @@ class AnchorSAFEVocab(BaseVocabulary):
             pass
 
         return ap_smiles
+
+    # Backward-compatible API aliases
+    def tokenize_ap(self, ap_smiles: str) -> List[int]:
+        """Backward-compatible alias for tokenize()."""
+        return self.tokenize(ap_smiles)
+
+    def detokenize_ap(self, token_ids: Sequence[int]) -> str:
+        """Backward-compatible alias for detokenize()."""
+        return self.detokenize(token_ids)

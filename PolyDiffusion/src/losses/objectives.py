@@ -8,7 +8,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from ..chem.ap_smiles import SHIELD1, SHIELD2
+from ..chem.ap_smiles import ANCHOR1, ANCHOR2
 
 
 def diffusion_ce(model, outputs, x0, timesteps, mask) -> torch.Tensor:
@@ -59,9 +59,9 @@ def _anchor_supervision_loss(
     targets: torch.Tensor,
     vocab,
 ) -> torch.Tensor:
-    shield1_id = vocab.token_to_id[SHIELD1]
-    shield2_id = vocab.token_to_id[SHIELD2]
-    mask = (targets == shield1_id) | (targets == shield2_id)
+    anchor1_id = vocab.token_to_id[ANCHOR1]
+    anchor2_id = vocab.token_to_id[ANCHOR2]
+    mask = (targets == anchor1_id) | (targets == anchor2_id)
     if not torch.any(mask):
         return logits.new_tensor(0.0)
     selected_logits = logits[mask]

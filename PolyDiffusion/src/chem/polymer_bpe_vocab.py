@@ -335,3 +335,12 @@ class PolymerBPEVocab(BaseVocabulary):
         smiles = "".join(tokens)
 
         return smiles
+
+    # Backward-compatible API aliases
+    def tokenize_ap(self, polymer_smiles: str) -> List[int]:
+        """Backward-compatible alias for tokenize()."""
+        return self.tokenize(polymer_smiles)
+
+    def detokenize_ap(self, token_ids: List[int]) -> str:
+        """Backward-compatible alias for detokenize()."""
+        return self.detokenize(token_ids)

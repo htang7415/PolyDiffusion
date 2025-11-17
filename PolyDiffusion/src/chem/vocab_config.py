@@ -19,7 +19,7 @@ class TokenizationConfig:
     # Vocabulary building parameters
     min_freq: int = 1
     max_size: Optional[int] = None
-    vocab_limit_samples: int = 10000
+    vocab_limit_samples: Optional[int] = None
 
     # SAFE-specific parameters
     safe_fragment_type: str = 'brics'  # brics, recap, or custom
@@ -94,7 +94,7 @@ def load_tokenization_config(stage_config: dict) -> TokenizationConfig:
         vocab_path=tok_cfg.get('vocab_path', ''),
         min_freq=build_cfg.get('min_freq', 1),
         max_size=build_cfg.get('max_size', None),
-        vocab_limit_samples=build_cfg.get('vocab_limit_samples', 10000),
+        vocab_limit_samples=build_cfg.get('vocab_limit_samples', None),
         safe_fragment_type=safe_cfg.get('fragment_type', 'brics'),
         safe_min_fragment_size=safe_cfg.get('min_fragment_size', 1),
         atom_regex_pattern=atom_cfg.get('pattern', 'default'),

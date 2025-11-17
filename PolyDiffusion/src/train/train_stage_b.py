@@ -554,9 +554,9 @@ def main() -> None:
     parser.add_argument(
         "--tokenization-method",
         type=str,
-        choices=["character", "atom_regex", "safe"],
+        choices=["character", "atom_regex", "safe", "polymer_bpe"],
         default=None,
-        help="Tokenization method to use (overrides config file setting). Options: character, atom_regex, safe."
+        help="Tokenization method to use (overrides config file setting). Options: character, atom_regex, safe, polymer_bpe."
     )
     args = parser.parse_args()
     run_stage_b(args.config, tokenization_method=args.tokenization_method)

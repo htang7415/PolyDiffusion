@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import Iterable, Optional
 
+from .ap_smiles import ANCHOR1, ANCHOR2
 from .atom_regex_vocab import AnchorAtomVocab, PlainAtomVocab
 from .base_vocab import BaseVocabulary
 from .character_vocab import AnchorCharacterVocab, PlainCharacterVocab
@@ -115,7 +116,7 @@ def load_vocabulary_auto(
         1. If file has metadata header (# TOKENIZATION_METHOD:), use that
         2. If tokenization_config provided, use that method
         3. Otherwise, detect by content:
-           - Has [Zz] and [Zr] → AnchorCharacterVocab
+           - Has [*:1] and [*:2] → AnchorCharacterVocab
            - Otherwise → PlainCharacterVocab
     """
     if not vocab_path.exists():
@@ -131,7 +132,7 @@ def load_vocabulary_auto(
         # Determine if anchors present
         # Note: Use '# ' to skip only metadata lines, preserving '#' as a valid token
         tokens_content = [line for line in lines if not line.startswith('# ')]
-        has_anchors = '[Zz]' in tokens_content and '[Zr]' in tokens_content
+        has_anchors = ANCHOR1 in tokens_content and ANCHOR2 in tokens_content
 
         # Map method name to class
         if method in ('PlainCharacterVocab', 'AnchorCharacterVocab', 'character'):
@@ -155,7 +156,7 @@ def load_vocabulary_auto(
         method = tokenization_config.method
         tokens_content = lines
 
-        has_anchors = '[Zz]' in tokens_content and '[Zr]' in tokens_content
+        has_anchors = ANCHOR1 in tokens_content and ANCHOR2 in tokens_content
 
         if method == 'character':
             VocabClass = AnchorCharacterVocab if has_anchors else PlainCharacterVocab
@@ -176,7 +177,7 @@ def load_vocabulary_auto(
     log.info("No metadata found, auto-detecting vocabulary type by content")
     tokens = lines
 
-    if '[Zz]' in tokens and '[Zr]' in tokens:
+    if ANCHOR1 in tokens and ANCHOR2 in tokens:
         log.info("Detected anchor tokens → AnchorCharacterVocab")
         return AnchorCharacterVocab(tokens)
     else:
