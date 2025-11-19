@@ -9,6 +9,7 @@ Learns fragments from polymer corpus using BPE algorithm.
 from __future__ import annotations
 
 import re
+import time
 from collections import Counter
 from typing import Iterable, List, Optional, Set, Tuple
 
@@ -16,6 +17,7 @@ from .base_vocab import BaseVocabulary
 
 try:
     from rdkit import Chem
+    from rdkit import RDLogger
     RDKIT_AVAILABLE = True
 except ImportError:
     RDKIT_AVAILABLE = False
@@ -91,8 +93,18 @@ class PolymerBPEVocab(BaseVocabulary):
         corpus_list = list(corpus)
         print(f"  Corpus size: {len(corpus_list)} polymers")
 
+        # Warn if corpus is very large (slow BPE learning)
+        if len(corpus_list) > 50000:
+            estimated_time_hours = len(corpus_list) * num_merges * 0.0002 / 3600
+            print(f"  ⚠️  WARNING: Large corpus ({len(corpus_list)} samples) will make BPE learning very slow!")
+            print(f"  ⚠️  Estimated time: {estimated_time_hours:.1f} hours")
+            print(f"  💡 TIP: Set 'vocab_limit_samples: 10000' in config for ~30 min build time")
+            print(f"  💡 Training will still use the full dataset - this only affects vocab building")
+
         # 3. Learn BPE merges
         current_vocab = list(vocab)
+        print(f"  Starting BPE learning with {num_merges} merge iterations...")
+        start_time = time.time()
 
         for merge_idx in range(num_merges):
             # Count adjacent pairs
@@ -125,8 +137,14 @@ class PolymerBPEVocab(BaseVocabulary):
             current_vocab.append(merged)
             vocab.add(merged)
 
-            if (merge_idx + 1) % 50 == 0:
-                print(f"  Merge {merge_idx + 1}/{num_merges}: '{best_pair[0]}' + '{best_pair[1]}' = '{merged}' (freq={count})")
+            # Show progress more frequently with time estimates
+            if (merge_idx + 1) % 10 == 0 or merge_idx < 5:
+                elapsed = time.time() - start_time
+                rate = (merge_idx + 1) / elapsed if elapsed > 0 else 0
+                eta_seconds = (num_merges - merge_idx - 1) / rate if rate > 0 else 0
+                eta_min = eta_seconds / 60
+                print(f"  Merge {merge_idx + 1}/{num_merges}: '{best_pair[0]}' + '{best_pair[1]}' = '{merged}' "
+                      f"(freq={count}, vocab_size={len(vocab)}, rate={rate:.2f}/s, ETA={eta_min:.1f}min)")
 
             # Stop if vocab too large
             if max_size is not None and len(vocab) >= max_size:
@@ -262,6 +280,8 @@ class PolymerBPEVocab(BaseVocabulary):
 
         # Try parsing as SMILES
         if RDKIT_AVAILABLE:
+            # Suppress RDKit warnings for incomplete fragments
+            RDLogger.DisableLog('rdApp.*')
             try:
                 mol = Chem.MolFromSmiles(fragment)
                 if mol is not None:
