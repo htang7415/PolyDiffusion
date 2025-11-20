@@ -128,11 +128,12 @@ class PolymerBPEVocab(BaseVocabulary):
             # Merge tokens
             merged = best_pair[0] + best_pair[1]
 
-            # Validate merged fragment
-            if not cls._is_valid_fragment(merged):
-                # Skip invalid merges
-                continue
-
+            # Add to vocab directly (no validation needed)
+            # Note: BPE naturally creates incomplete SMILES fragments (e.g., "C(", "=O", "c1ccccc")
+            # that are valid substrings from valid polymers, even if not parseable as complete molecules.
+            # These fragments are learned from a corpus of valid polymers, so they represent
+            # chemically meaningful building blocks. The model learns valid combinations during
+            # training. Validation happens post-generation on complete SMILES, not on fragments.
             # Add to vocab
             current_vocab.append(merged)
             vocab.add(merged)
@@ -265,7 +266,17 @@ class PolymerBPEVocab(BaseVocabulary):
 
     @staticmethod
     def _is_valid_fragment(fragment: str) -> bool:
-        """Check if fragment is chemically valid."""
+        """Check if fragment is chemically valid.
+
+        DEPRECATED: This method is no longer used in BPE vocabulary building.
+        Fragment validation was removed because:
+        - BPE creates incomplete SMILES fragments ("C(", "=O") that are valid substrings
+        - These fragments come from valid polymers, so they're chemically meaningful
+        - Validation happens post-generation on complete molecules, not on fragments
+        - Overly strict validation caused infinite retry bugs (only 84 tokens learned)
+
+        Kept for backward compatibility only.
+        """
         # Anchors always valid
         if fragment in ANCHOR_TOKENS:
             return True

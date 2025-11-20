@@ -185,7 +185,7 @@ training:
                           # Prevents overfitting
 
   # Training duration
-  steps: 50000           # Total training steps (INCREASED from 30k)
+  steps: 30000           # Total training steps (INCREASED from 30k)
                           #
                           # 100k steps × 1024 batch = 102.4M samples seen
                           # Dataset: 10.8M polymers
