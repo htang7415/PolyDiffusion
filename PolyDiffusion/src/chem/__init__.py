@@ -10,6 +10,14 @@ from .ap_smiles import (
 from .polymer_bpe_vocab import PolymerBPEVocab
 from .valence import has_two_anchors, valence_ok
 
+# Silence RDKit parse warnings globally to keep logs clean when filtering SMILES
+try:  # pragma: no cover
+    from rdkit import RDLogger
+
+    RDLogger.DisableLog("rdApp.*")
+except Exception:
+    pass
+
 __all__ = [
     # Deprecated functions (kept for backward compatibility):
     "shield_anchors",  # DEPRECATED - all tokenizers now use [*:1]/[*:2] directly

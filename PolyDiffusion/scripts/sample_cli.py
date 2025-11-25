@@ -63,6 +63,12 @@ STAGE_METRIC_KEYS = {
 }
 
 _SA_WARNING_EMITTED = False
+_SCRIPT_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_CONFIG_CANDIDATES = [
+    _SCRIPT_ROOT / "configs" / "model_base.yaml",
+    Path("PolyDiffusion") / "configs" / "model_base.yaml",
+    Path("configs") / "model_base.yaml",
+]
 
 
 def _get_peak_memory_mb() -> float:
@@ -269,6 +275,30 @@ def _load_stage_vocab(stage: str, vocab_path: Path) -> BaseVocabulary:
     return vocab
 
 
+def _resolve_config_path(config_arg: Optional[str]) -> Path:
+    candidates: List[Path] = []
+    if config_arg:
+        user_path = Path(config_arg).expanduser()
+        candidates.append(user_path)
+        repo_relative = _SCRIPT_ROOT / config_arg
+        if repo_relative != user_path:
+            candidates.append(repo_relative)
+    else:
+        candidates.extend(_DEFAULT_CONFIG_CANDIDATES)
+
+    for idx, candidate in enumerate(candidates):
+        if candidate.exists():
+            if idx > 0 or config_arg is None:
+                print(f"[sample_cli] Using model config from {candidate}", file=sys.stderr)
+            return candidate
+
+    searched = "\n  ".join(str(path) for path in candidates)
+    raise FileNotFoundError(
+        "Unable to locate a model config YAML. Checked the following locations:\n"
+        f"  {searched}"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sample molecules/polymers from trained PolyDiffusion checkpoints.")
     parser.add_argument("--ckpt", required=True, type=str, help="Checkpoint path.")
@@ -277,7 +307,12 @@ def main() -> None:
         type=str,
         help="Vocabulary file. If omitted, attempts to infer from the checkpoint folder or stage defaults.",
     )
-    parser.add_argument("--config", default="configs/model_base.yaml", type=str, help="Model config YAML.")
+    parser.add_argument(
+        "--config",
+        default=None,
+        type=str,
+        help="Model config YAML. Defaults to the packaged model_base.yaml if not provided.",
+    )
     parser.add_argument("--num", default=10, type=int, help="Number of samples.")
     parser.add_argument("--steps", default=10, type=int, help="Diffusion steps.")
     parser.add_argument("--targets", default="", type=str, help="Comma separated property targets.")
@@ -318,7 +353,7 @@ def main() -> None:
     stage = args.stage.lower()
     ckpt_path = Path(args.ckpt)
     vocab_path = _resolve_vocab_path(stage, ckpt_path, args.vocab)
-    model_cfg = load_yaml(Path(args.config))
+    model_cfg = load_yaml(_resolve_config_path(args.config))
 
     vocab = _load_stage_vocab(stage, vocab_path)
 

@@ -24,6 +24,13 @@ from ..data.datasets import CsvDataset, DatasetConfig, JsonlDataset
 from ..models.dit_token import DiffusionTransformer, ModelConfig
 from ..models.diffusion_token import DiffusionConfig
 from ..utils.fileio import open_compressed
+try:
+    from rdkit import Chem
+
+    RDKIT_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    Chem = None
+    RDKIT_AVAILABLE = False
 
 
 PROPERTY_NAMES = ["Tg", "Tm", "Td", "Eg", "chi"]
@@ -75,6 +82,22 @@ def _find_first_key(record: Record, candidates: Sequence[str]) -> Optional[str]:
         if key in record:
             return key
     return None
+
+
+def _is_valid_smiles(smiles: str) -> bool:
+    """
+    Lightweight RDKit validity check to drop malformed inputs early.
+
+    Returns True if RDKit parses the string, or if RDKit is unavailable.
+    """
+    if not smiles:
+        return False
+    if not RDKIT_AVAILABLE:
+        return True
+    try:
+        return Chem.MolFromSmiles(smiles) is not None
+    except Exception:
+        return False
 
 
 def _extract_optional_float(record: Record, keys: Sequence[str], default: float = 0.0) -> float:
@@ -144,13 +167,21 @@ def build_vocab_from_dataset(
                     smiles_key = key
                     break
             if smiles_key:
-                corpus.append(str(record[smiles_key]))
-                count += 1
+                smiles = str(record[smiles_key])
+                if _is_valid_smiles(smiles):
+                    corpus.append(smiles)
+                    count += 1
+                else:
+                    log.debug("Dropping invalid SMILES during vocab build: %s", smiles)
         else:
             # Stage B/C: polymer SMILES with attachment points
             if "ap_smiles" in record:
-                corpus.append(str(record["ap_smiles"]))
-                count += 1
+                ap = str(record["ap_smiles"])
+                if _is_valid_smiles(ap):
+                    corpus.append(ap)
+                    count += 1
+                else:
+                    log.debug("Dropping invalid ap_smiles during vocab build: %s", ap)
             else:
                 # Raw polymer SMILES - convert
                 smiles_key = None
@@ -160,10 +191,16 @@ def build_vocab_from_dataset(
                         break
                 if smiles_key:
                     raw = str(record[smiles_key])
+                    if not _is_valid_smiles(raw):
+                        log.debug("Dropping invalid polymer SMILES during vocab build: %s", raw)
+                        continue
                     try:
                         ap = convert_polymer_to_ap_smiles(raw)
-                        corpus.append(ap)
-                        count += 1
+                        if _is_valid_smiles(ap):
+                            corpus.append(ap)
+                            count += 1
+                        else:
+                            log.debug("Dropping invalid ap_smiles after conversion during vocab build: %s", ap)
                     except ValueError as e:
                         log.warning(f"Skipping invalid polymer SMILES '{raw}': {e}")
 
@@ -288,14 +325,67 @@ def build_stage_dataset(
 
     if stage == "a":
         # No required fields - collate will auto-detect and handle missing SA_Score
-        return dataset_cls(config, required_fields=set())
+        dataset = dataset_cls(config, required_fields=set())
+        _filter_invalid_records(dataset, stage)
+        return dataset
     if stage == "b":
         # No required fields - collate will auto-detect and handle missing SA_Score
-        return dataset_cls(config, required_fields=set())
+        dataset = dataset_cls(config, required_fields=set())
+        _filter_invalid_records(dataset, stage)
+        return dataset
 
     property_fields = set(property_names or PROPERTY_NAMES)
     required = {"ap_smiles"} | property_fields
-    return dataset_cls(config, required_fields=required)
+    dataset = dataset_cls(config, required_fields=required)
+    _filter_invalid_records(dataset, stage)
+    return dataset
+
+
+def _filter_invalid_records(dataset, stage: str) -> int:
+    """
+    Drop records with SMILES that RDKit cannot parse. Returns number dropped.
+    """
+    if not RDKIT_AVAILABLE:
+        return 0
+
+    log = logging.getLogger(__name__)
+    filtered = []
+    dropped = 0
+
+    for record in dataset._records:
+        if stage == "a":
+            key = _find_first_key(record, SMILES_KEYS_STAGE_A)
+            smiles = str(record[key]) if key else ""
+            if _is_valid_smiles(smiles):
+                filtered.append(record)
+            else:
+                dropped += 1
+        else:
+            if "ap_smiles" in record:
+                ap = str(record["ap_smiles"])
+                if _is_valid_smiles(ap):
+                    filtered.append(record)
+                else:
+                    dropped += 1
+            else:
+                key = _find_first_key(record, RAW_POLYMER_SMILES_KEYS)
+                smiles = str(record[key]) if key else ""
+                if _is_valid_smiles(smiles):
+                    filtered.append(record)
+                else:
+                    dropped += 1
+
+    if dropped:
+        original = len(dataset._records)
+        dataset._records = filtered
+        log.info(
+            "Filtered %d invalid SMILES records (%.2f%%, stage=%s).",
+            dropped,
+            dropped * 100.0 / max(original, 1),
+            stage,
+        )
+
+    return dropped
 
 
 def default_device() -> torch.device:
